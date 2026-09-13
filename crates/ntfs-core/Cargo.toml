@@ -1,0 +1,13 @@
+[package]
+name = "ntfs-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Clean-room NTFS on-disk parsers, safety probes, and the BlockDevice trait"
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1"

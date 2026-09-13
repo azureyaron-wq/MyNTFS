@@ -1,0 +1,25 @@
+[package]
+name = "ntfs-fuse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Linux FUSE front-end over ntfs-vfs"
+rust-version.workspace = true
+
+[[bin]]
+name = "ntfs-fuse"
+path = "src/main.rs"
+
+[features]
+default = []
+fuse = ["dep:fuser"]
+
+[dependencies]
+ntfs-vfs.workspace = true
+ntfs-core.workspace = true
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = { version = "0.15", optional = true }
+libc.workspace = true

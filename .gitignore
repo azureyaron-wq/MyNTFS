@@ -1,0 +1,16 @@
+/target
+/testdata/*.img
+/testdata/golden/*.img
+/apple/MyNTFS.app
+**/*.rs.bk
+**/**/._*
+.DS_Store
+*.swp
+/graphify-out
+/.firecrawl
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+.env
+.idea
+.vscode

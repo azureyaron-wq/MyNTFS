@@ -1,0 +1,20 @@
+[package]
+name = "ntfs-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ntfs-cli — ls/cat/cp/stat/fsck/bench/mkfs across macOS and Linux"
+rust-version.workspace = true
+
+[[bin]]
+name = "ntfs-cli"
+path = "src/main.rs"
+
+[dependencies]
+ntfs-core.workspace = true
+ntfs-io.workspace = true
+ntfs-vfs.workspace = true
+am-fs-ntfs.workspace = true
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+hex = "0.4"

@@ -1,0 +1,13 @@
+[package]
+name = "ntfs-vfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mounted NTFS volume: safety gates, caches, streaming copy, write staging"
+rust-version.workspace = true
+
+[dependencies]
+ntfs-core.workspace = true
+ntfs-io.workspace = true
+am-fs-ntfs.workspace = true
+thiserror.workspace = true

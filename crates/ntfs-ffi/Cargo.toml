@@ -1,0 +1,17 @@
+[package]
+name = "ntfs-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI (myntfs_*) for the Swift app and FSKit extension"
+rust-version.workspace = true
+
+[lib]
+name = "myntfs"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+ntfs-vfs.workspace = true
+ntfs-core.workspace = true
+ntfs-io.workspace = true
+libc.workspace = true

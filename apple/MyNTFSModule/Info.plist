@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>EXAppExtensionAttributes</key>
+  <dict>
+    <key>FSShortName</key>
+    <string>myntfs</string>
+    <key>FSSupportsBlockResources</key>
+    <true/>
+    <key>FSSupportsKernelOffloadedIO</key>
+    <true/>
+    <key>FSMediaTypes</key>
+    <dict>
+      <key>Windows_NTFS</key>
+      <dict>
+        <key>FSProbeOrder</key>
+        <integer>500</integer>
+      </dict>
+      <key>EBD0A0A2-B9E5-4433-87C0-68B6B72699C7</key>
+      <dict>
+        <key>FSProbeOrder</key>
+        <integer>500</integer>
+      </dict>
+      <key>Partitionless</key>
+      <dict>
+        <key>FSProbeOrder</key>
+        <integer>500</integer>
+      </dict>
+    </dict>
+  </dict>
+</dict>
+</plist>

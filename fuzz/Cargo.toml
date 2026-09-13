@@ -1,0 +1,40 @@
+[package]
+name = "ntfs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ntfs-core = { path = "../crates/ntfs-core" }
+
+[[bin]]
+name = "fuzz_boot"
+path = "fuzz_targets/fuzz_boot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mft"
+path = "fuzz_targets/fuzz_mft.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_runlist"
+path = "fuzz_targets/fuzz_runlist.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_lznt1"
+path = "fuzz_targets/fuzz_lznt1.rs"
+test = false
+doc = false
+bench = false

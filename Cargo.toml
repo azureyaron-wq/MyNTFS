@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ntfs-core",
+    "crates/ntfs-io",
+    "crates/ntfs-vfs",
+    "crates/ntfs-ffi",
+    "crates/ntfs-cli",
+    "crates/ntfs-fuse",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yaron/MyNTFS"
+rust-version = "1.80"
+
+[workspace.dependencies]
+ntfs-core = { path = "crates/ntfs-core" }
+ntfs-io = { path = "crates/ntfs-io" }
+ntfs-vfs = { path = "crates/ntfs-vfs" }
+am-fs-ntfs = "0.4.0"
+thiserror = "2"
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+
+[profile.dev]
+opt-level = 1

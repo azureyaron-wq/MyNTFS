@@ -1,0 +1,12 @@
+[package]
+name = "ntfs-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Block-device backends: image files, raw disks, LRU metadata cache"
+rust-version.workspace = true
+
+[dependencies]
+ntfs-core.workspace = true
+thiserror.workspace = true
+libc.workspace = true

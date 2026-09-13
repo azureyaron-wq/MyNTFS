@@ -138,14 +138,14 @@ mod fuse_main {
             };
             let mut idx = 0i64;
             if offset <= 0 {
-                if reply.add(1, idx, FileType::Directory, ".".as_ref()) {
+                if reply.add::<&OsStr>(1, idx, FileType::Directory, OsStr::new(".")) {
                     reply.ok();
                     return;
                 }
                 idx += 1;
             }
             if offset <= 1 {
-                if reply.add(1, idx, FileType::Directory, "..".as_ref()) {
+                if reply.add::<&OsStr>(1, idx, FileType::Directory, OsStr::new("..")) {
                     reply.ok();
                     return;
                 }
@@ -162,7 +162,7 @@ mod fuse_main {
                 } else {
                     FileType::RegularFile
                 };
-                if reply.add(ino, idx, kind, e.name.as_ref()) {
+                if reply.add(ino, idx, kind, OsStr::new(&e.name)) {
                     break;
                 }
                 idx += 1;

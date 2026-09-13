@@ -5,6 +5,7 @@
 **/*.rs.bk
 **/**/._*
 .DS_Store
+**/.DS_Store
 *.swp
 /graphify-out
 /.firecrawl
@@ -14,3 +15,5 @@
 .env
 .idea
 .vscode
+.cursor/
+/CURSOR_*.md

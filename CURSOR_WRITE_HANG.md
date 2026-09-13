@@ -1,91 +1,48 @@
-# Cursor FINAL handoff — MyNTFS USB write (once and for all)
+# Cursor handoff — MyNTFS New File / mftbm EINVAL (local-first)
 
 Date: 2026-09-13  
-From: Clive roll-up of **Aegis + Canary + Keystone + Pulse**. **No Atlas. No Forge.**
+From: Clive + **Orchard (Apple)** confirmation. Aegis/Canary/Keystone/Pulse prior write-path consensus still applies for DA/authopen. **No Atlas.**
 
-## Consensus verdict
-**v1 write path that ships:**
+## Stop / ownership
+Clive **stopped** local `build.sh` per user request. Cursor owns finish: verify patch, rebuild `.app`, USB retest, commit/PR if desired.
 
-1. **DA mount veto + claim** (`dahold.c` / `myntfs_da_hold`) — hold **before** auth and keep alive until close/fail/cancel  
-2. **Force-unmount allowlisted slice only** → verify `Mounted: No`  
-3. **`authopen` O_RDWR** (`authopen_fd.c` / `myntfs_authopen_rdisk`) + F_GETFL writable + no RO fallback  
-4. **`myntfs_mount_ex(..., writable=1, allow_device_write=1)`** + `myntfs_is_writable`  
-5. **External-only** refuse (boot/internal/`disk0`) at DA **and** claim layers  
-6. **Consent + busy/cancel** → on fail/cancel: clear priv FD, `da_release`, remount Finder RO  
+## User symptoms
+1. Alert: `corrupt: read mftbm: i/o: Invalid argument (os error 22)`
+2. Green **Read-Write** badge + `$MFT` listing, mutate buttons look grey — **New File did run**; buttons are not the create blocker (Orchard).
 
-**Do not regress** to AppleScript / `privopen` / root `open` via osascript.  
-**Do not gate v1** on SMJobBless, FSKit-as-primary product, or default whole-disk `unmountDisk force`.  
-Helper-unmount alone is **not** enough for production (Canary/Aegis/Keystone agree).
+## Root cause (CONFIRMED)
+`crates/ntfs-io/src/lib.rs` — `detect_logical_block_size(file, meta_len)` returned **0 whenever `meta_len > 0`**. Callers pass `device_file_size()` (ioctl size, tens of GB on `/dev/rdisk*`), so alignment bounce **never armed**.  
+`am-fs-ntfs` create → 1-byte `$MFT:$Bitmap` `read_exact_at` → macOS raw `pread` → **EINVAL**.
 
-Tree already has `authopen_fd.c` + `dahold.c` (privopen gone). Cursor job = finish wiring, verify order, pass G0–G10, then UI P0s.
+Listing can work (larger transfers); create always hits 1-byte mftbm.
 
-## Critical order (Keystone + Aegis)
-`veto/hold early → Authorization/authopen → force-unmount immediately before O_RDWR (or re-unmount after auth) → set priv fd → mount_ex`  
+## Fix (already applied on Mac working tree — not pushed)
+File: `crates/ntfs-io/src/lib.rs`
 
-DA hold must **not** drop during the password sheet. Fail closed if still mounted after hold.
+- Key off **`file.metadata().len()`** (0 on rdisk), **not** ioctl device size.
+- If stat size is 0: `DKIOCGETBLOCKSIZE`, else fallback **512** (never leave 0).
+- Unit test added: `detect_uses_stat_not_device_size` — **passed** (`cargo test -p ntfs-io --lib` → 10/10 ok).
 
-## Aegis must-nots
-- Whole-disk force by default  
-- Shell/`system()`/osascript elevation  
-- Soft claim Ok while still mounted  
-- Softening “still mounted” into retry-without-hold  
-- Probe fail-open writable; FSKit Phase 5 probe-all until validated  
-- Ship `target/`  
+Git: `master` dirty — `M crates/ntfs-io/src/lib.rs` only (uncommitted). Remote `origin` is https://github.com/azureyaron-wq/MyNTFS (private). Cursor cloud agent may need GitHub **access** grant for that repo.
 
-## Canary must-pass gates (v1)
-| Gate | Expect |
-|------|--------|
-| **G0** Image Enable writes / New File | No password |
-| **G1** USB happy path | DA hold OK → authopen writable → RW badge → create/edit/delete |
-| **G2** Wait ≥7s on password | Still RW under DA veto, or explicit fail — never generic EPERM only |
-| **G3** Parallel `diskutil mount` during elevate | Success under veto or clear fail ≤2 retries; busy clears; Finder remount on fail |
-| **G4** Still mounted after hold | Fail, no elevate |
-| **G5** Non-writable fd | Reject; no RO→RW mount |
-| **G6** New File ≤30s after RW | Off-main FFI; UI responsive |
-| **G7** Cancel/fail | da_release, clear priv, Finder RO, no hang |
-| **G8** Dirty/hiber/BitLocker | Safety message, not “permission failed” |
-| **G9** Internal/boot | Refused |
-| **G10** Slice-only force | `diskNsM` only by default |
+## Cursor EXECUTE
+1. Confirm the patched `detect_logical_block_size` in `crates/ntfs-io/src/lib.rs` matches the contract above.
+2. `cargo test -p ntfs-io --lib`
+3. `bash apple/MyNTFS/build.sh` — test the **built** `apple/MyNTFS.app`
+4. USB: Enable writes → **New File** / save — must not show mftbm EINVAL
+5. Image path regress: `.img` Enable writes / New File — no password
+6. Optional: clearer error if EINVAL on raw I/O (“alignment”) instead of generic corrupt
+7. Commit + push/PR when green (do not ship `target/` or `.app`)
 
-## Pulse UI (after write green, or parallel P0)
-**P0:** Wire or delete dead `showWriteConfirm` / `showPicker`; add Export log + Close volume; badge “Finder (read-only)”; Cancel must not pretend to stop FFI mutations (disable Cancel during mutate or document); status always visible.  
-**P1:** Split overcrowded toolbar; safety bullets in Enable alert; disable mutate with help until `canMutate`.  
-**P2:** Strip `agentDbg` / localhost debug ingest from release; sync Mac as source of truth.
+## Do not regress
+- DA hold for whole RW session (`dahold.c`)
+- `authopen` O_RDWR + `myntfs_mount_fd` (not AppleScript privopen / `mount_ex` on USB path)
+- Slice-only force-unmount; external-only
 
-## Keystone extras
-- Strip agentDbg HTTP/file ingest from release builds  
-- Keep rdisk allowlist + safety gates  
-- Defer SMJobBless + FSKit product path + heavy UI polish until write G0–G10 green  
-
-
-## Canary R1–R12 (must-pass vs defer)
-
-**One-liner:** v1 USB write = DA hold + authopen O_RDWR + slice force-unmount, proven by R1–R3/R8–R11 (+ light R5/R10); **not** unmount-in-helper alone.
-
-| Race | v1 | Notes |
-|------|----|-------|
-| R1 remount between unmount and open | **MUST** | DA veto + hold-before-authopen; storm test |
-| R2 soft claim Ok while mounted | **MUST** | Fail closed if Mounted Yes |
-| R3 auth-sheet remount (F7) | **MUST** | Wait ≥7s on password |
-| R4 whole-disk vs slice | **MUST (slice-only)** | Whole-disk not default |
-| R5 double consumer after RW | **MUST (light)** | Create works after RW badge |
-| R6 Paragon / 3rd-party | DEFER | Explicit error if hold fails |
-| R7 sleep/lid during password | DEFER | Cancel/retry OK |
-| R8 post-open remount before mutate | **MUST** | New File ≤30s after Enable writes |
-| R9 stale UI mountPoint | **MUST** | Trust diskutil/DA, not UI cache |
-| R10 Enable-writes retry storm | **MUST (light)** | No hang; remount-on-fail |
-| R11 image control | **MUST** | Always first; no password |
-| R12 cable yank mid-elevate | DEFER | Fail-closed |
-
-Residual accept for v1 (don’t block ship): Paragon exotic, sleep/wake mid-auth, multi-instance, cable-yank — fail-closed UX, not extra architecture.
-
-## Rebuild
-`bash apple/MyNTFS/build.sh` — test the **built** `.app`.
-
-## Suggested commit
+## Suggested commit message
 ```
-fix(macos): DA hold + authopen RDWR for FSKit-safe USB writes
+fix(ntfs-io): detect rdisk logical block size via stat, not ioctl size
 
-Keep mount veto through auth; slice force-unmount; writable fd only;
-no osascript privopen. Gates G0–G10.
+device_file_size() made detect_logical_block_size always return 0 on
+/dev/rdisk*, so 1-byte $MFT:$Bitmap reads hit EINVAL (mftbm).
 ```

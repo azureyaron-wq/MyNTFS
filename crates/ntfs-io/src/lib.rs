@@ -131,7 +131,7 @@ impl BlockDevice for FileDevice {
     }
 
     fn flush(&self) -> Result<()> {
-        self.file.sync_data().map_err(Error::from)
+        flush_file(&self.file)
     }
 }
 
@@ -229,6 +229,87 @@ pub fn dup_owned_file(fd: i32, writable: bool) -> Result<std::fs::File> {
         return Err(Error::Io(std::io::Error::last_os_error()));
     }
     Ok(unsafe { std::fs::File::from_raw_fd(duped) })
+}
+
+fn flush_file(file: &std::fs::File) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        if is_raw_media_fd(file) {
+            return flush_macos_raw(file);
+        }
+    }
+    file.sync_data().map_err(Error::from)
+}
+
+#[cfg(unix)]
+fn is_raw_media_fd(file: &std::fs::File) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    file.metadata()
+        .map(|m| m.file_type().is_char_device() || m.file_type().is_block_device())
+        .unwrap_or(false)
+}
+
+fn unsupported_flush_errno(errno: i32) -> bool {
+    matches!(
+        errno,
+        libc::ENOTTY | libc::EINVAL | libc::ENODEV | libc::ENOTSUP
+    )
+}
+
+fn raw_sync_err(step: &str, errno: i32) -> Error {
+    Error::Io(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!(
+            "raw-device synchronization failed ({step}): {}",
+            std::io::Error::from_raw_os_error(errno)
+        ),
+    ))
+}
+
+/// Pure flush policy for macOS `/dev/rdisk*`.
+/// `0` means success; any other value is an errno from that syscall.
+fn flush_raw_strategy(ioctl_errno: i32, fsync_errno: i32) -> Result<()> {
+    if ioctl_errno == 0 {
+        return Ok(());
+    }
+    if !unsupported_flush_errno(ioctl_errno) {
+        return Err(raw_sync_err("DKIOCSYNCHRONIZECACHE", ioctl_errno));
+    }
+    if fsync_errno == 0 {
+        return Ok(());
+    }
+    Err(raw_sync_err(
+        "DKIOCSYNCHRONIZECACHE unsupported; fsync",
+        fsync_errno,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn syscall_errno(f: impl FnOnce() -> libc::c_int) -> i32 {
+    if f() == 0 {
+        0
+    } else {
+        std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn flush_macos_raw(file: &std::fs::File) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    // _IO('d', 22) — Darwin raw-media cache flush (IOMediaBSDClient).
+    const DKIOCSYNCHRONIZECACHE: libc::c_ulong = 0x2000_6416;
+    let fd = file.as_raw_fd();
+    let ioctl_errno = syscall_errno(|| unsafe { libc::ioctl(fd, DKIOCSYNCHRONIZECACHE) });
+    let fsync_errno = if ioctl_errno == 0 {
+        0
+    } else if unsupported_flush_errno(ioctl_errno) {
+        syscall_errno(|| unsafe { libc::fsync(fd) })
+    } else {
+        ioctl_errno
+    };
+    flush_raw_strategy(ioctl_errno, fsync_errno)
 }
 
 fn detect_logical_block_size(file: &std::fs::File, _device_size: u64) -> u32 {
@@ -665,6 +746,52 @@ mod alignment_tests {
         let check = &mut check_store[check_off..check_off + 1];
         aligned_read_at(&file, BS, 5, check).unwrap();
         assert_eq!(check[0], 0xCD);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn flush_raw_ioctl_success() {
+        use super::flush_raw_strategy;
+        flush_raw_strategy(0, libc::ENOTTY).unwrap();
+    }
+
+    #[test]
+    fn flush_raw_ioctl_unsupported_fsync_ok() {
+        use super::flush_raw_strategy;
+        flush_raw_strategy(libc::ENOTTY, 0).unwrap();
+        flush_raw_strategy(libc::ENOTSUP, 0).unwrap();
+        flush_raw_strategy(libc::EINVAL, 0).unwrap();
+    }
+
+    #[test]
+    fn flush_raw_both_fail() {
+        use super::flush_raw_strategy;
+        let err = flush_raw_strategy(libc::ENOTTY, libc::ENOTTY).unwrap_err().to_string();
+        assert!(
+            err.contains("raw-device synchronization failed"),
+            "got {err}"
+        );
+        assert!(err.contains("fsync"), "got {err}");
+
+        let eio = flush_raw_strategy(libc::EIO, 0).unwrap_err().to_string();
+        assert!(eio.contains("DKIOCSYNCHRONIZECACHE"), "got {eio}");
+        assert!(!eio.contains("fsync"), "hard ioctl errors must not fall back: {eio}");
+    }
+
+    #[test]
+    fn simulated_alignment_image_still_flushes_as_regular_file() {
+        use super::{flush_file, is_raw_media_fd};
+        let (path, file) = pattern_file();
+        assert!(!is_raw_media_fd(&file));
+        let dev = FileDevice::from_file_with_logical_block_size(
+            file.try_clone().unwrap(),
+            true,
+            &path,
+            BS,
+        )
+        .unwrap();
+        ntfs_core::BlockDevice::flush(&dev).unwrap();
+        flush_file(&file).unwrap();
         cleanup(&path);
     }
 }

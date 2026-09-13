@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 
-use ntfs_core::WritePolicy;
+use ntfs_core::{BlockDevice, WritePolicy};
 use ntfs_vfs::{format_image, DeviceWriteConfirm, Volume};
 
 fn formatted_image(tag: &str) -> PathBuf {
@@ -157,4 +157,66 @@ fn fd_roundtrip_with_simulated_sector_alignment() {
     let n = vol.read("/renamed.txt", 0, &mut buf).unwrap();
     assert_eq!(&buf[..n], b"owned-fd");
     vol.unlink("/renamed.txt").unwrap();
+}
+
+/// Live USB roundtrip for the owned-FD engine. Opt-in:
+/// `MYNTFS_USB_RDISK=/dev/rdiskNsM cargo test -p ntfs-vfs --test fd_io usb_live_rdisk -- --ignored`
+/// Refuses whole disks, non-rdisk paths, and devices larger than 32 GiB.
+#[test]
+#[ignore]
+fn usb_live_rdisk_create_delete() {
+    use std::os::unix::fs::FileTypeExt;
+
+    let path = std::env::var("MYNTFS_USB_RDISK").expect("MYNTFS_USB_RDISK unset");
+    assert!(
+        path.starts_with("/dev/rdisk") && path.contains('s'),
+        "refusing {path}: expected /dev/rdiskNsM slice"
+    );
+    let meta = std::fs::metadata(&path).unwrap();
+    assert!(
+        meta.file_type().is_char_device(),
+        "{path} is not a character device"
+    );
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let sized = ntfs_io::FileDevice::from_file(file.try_clone().unwrap(), false, &path).unwrap();
+    let bytes = sized.size();
+    drop(sized);
+    assert!(
+        bytes > 1_000_000_000 && bytes < 32 * 1024 * 1024 * 1024,
+        "refusing live write: device size {bytes} is not a small test stick"
+    );
+    let vol = Volume::mount_from_file(
+        file,
+        &path,
+        WritePolicy::ReadWriteIfSafe,
+        DeviceWriteConfirm {
+            allow_block_device: true,
+        },
+    )
+    .unwrap();
+    assert!(vol.writable(), "volume did not come up writable");
+
+    let tag = format!(
+        "MyNtfsSmoke{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+    vol.mkdir("/", &tag).unwrap();
+    let file_name = format!("{tag}.txt");
+    vol.create_file(&format!("/{tag}"), &file_name).unwrap();
+    vol.write_contents(&format!("/{tag}/{file_name}"), b"standalone-ok")
+        .unwrap();
+    let mut buf = [0u8; 16];
+    let n = vol
+        .read(&format!("/{tag}/{file_name}"), 0, &mut buf)
+        .unwrap();
+    assert_eq!(&buf[..n], b"standalone-ok");
+    vol.unlink(&format!("/{tag}/{file_name}")).unwrap();
+    vol.rmdir(&format!("/{tag}")).unwrap();
 }

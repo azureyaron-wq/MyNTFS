@@ -2,6 +2,20 @@
 
 Native macOS + Linux NTFS read/write stack built on a permissive Rust engine.
 
+**License:** [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE) (`SPDX-License-Identifier: MIT OR Apache-2.0`).
+
+The write engine uses [`am-fs-ntfs`](https://crates.io/crates/am-fs-ntfs) (MIT/Apache). No GPL NTFS code is linked.
+
+## Clone and test
+
+```bash
+git clone https://github.com/azureyaron-wq/MyNTFS.git
+cd MyNTFS
+cargo test -p ntfs-core -p ntfs-io -p ntfs-vfs
+```
+
+The git tree is **source only**. Do not expect `target/`, `graphify-out/`, or a prebuilt Mac app in the clone.
+
 ## Layout
 
 - `crates/ntfs-core` — clean-room parsers, safety probes, `BlockDevice` trait
@@ -9,11 +23,10 @@ Native macOS + Linux NTFS read/write stack built on a permissive Rust engine.
 - `crates/ntfs-vfs` — mounted volume API (wraps `am-fs-ntfs` for read/write)
 - `crates/ntfs-ffi` — C ABI (`myntfs_*`) for Swift / FSKit
 - `crates/ntfs-cli` — portable CLI (`mkfs`, `ls`, `cat`, `cp`, `bench`, …)
-- `crates/ntfs-fuse` — Linux FUSE front-end (`--features fuse`)
-- `apple/MyNTFS` — SwiftUI dedicated app
-- `apple/MyNTFSModule` — FSKit extension skeleton (Phase 5)
+- `crates/ntfs-fuse` — Linux FUSE front-end (`--features fuse`; needs `libfuse3-dev` on Ubuntu)
+- `apple/MyNTFS` — SwiftUI dedicated app **sources** (build locally)
 
-## Quick start
+## Quick start (CLI / images)
 
 ```bash
 cargo build --release
@@ -31,7 +44,7 @@ bash scripts/build-golden-images.sh
 
 ### USB / real disk testing
 
-Use **read-only** commands only on drives with user data (`ls`, `stat`, `cat`, `cp` out to your Mac). The CLI refuses writes to `/dev/*` unless you pass a hidden `--i-understand-device-write` flag (do not use on the Moked drive).
+Use **read-only** commands only on drives with user data (`ls`, `stat`, `cat`, `cp` out to your Mac). The CLI refuses writes to `/dev/*` unless you pass a hidden `--i-understand-device-write` flag.
 
 ```bash
 ./target/debug/ntfs-cli probe          # lists NTFS disks, mount state, raw access
@@ -42,35 +55,34 @@ Use **read-only** commands only on drives with user data (`ls`, `stat`, `cat`, `
 
 Raw `/dev/rdisk*` access requires membership in the macOS `operator` group or `sudo`.
 
-## macOS app
+## macOS app (not shipped in git)
+
+Build the desktop app from this checkout:
 
 ```bash
 bash apple/MyNTFS/build.sh
 open apple/MyNTFS.app
 ```
 
-The dedicated app works today without special entitlements. Open NTFS disk images or `/dev/rdiskNsY` after unmounting with `ntfs-cli claim`.
+`apple/MyNTFS.app` is a **local build artifact**. It is gitignored and is not a notarized GitHub Release. Use a disposable USB stick for write tests.
 
-## Phase 5 — FSKit extension (gated)
+The dedicated app works today without special entitlements. Open NTFS disk images, or Enable writes on an external NTFS USB (macOS will ask for your password each time).
 
-System-wide auto-mount requires an FSKit File System Extension (`apple/MyNTFSModule/`).
+## Advanced — FSKit extension (lab only)
+
+System-wide auto-mount is **not** the v1 product. `apple/MyNTFSModule/` is an experimental FSKit skeleton.
 
 | Requirement | Detail |
 |---|---|
 | Entitlement | `com.apple.developer.fskit.fsmodule` + mandatory `com.apple.security.app-sandbox` |
 | Paid account | Provisioning-profile gated; free Apple IDs cannot sign the entitlement |
-| Local dev | Ad-hoc sign + boot-arg `amfi_get_out_of_my_way=1` (see OpenZFS FSKit PoC) |
+| Local lab | Ad-hoc sign; AMFI boot-args are **lab-only**, not a supported install |
 | Mount | `sudo mount -F -t myntfs /dev/diskNsY /Volumes/Label` |
-| Probe order | `FSProbeOrder` 500 beats Apple's read-only `ntfs.fs` (1000–4000) |
-| Performance | Implement KOIO (`blockmapFile` / `completeIO`); inhibit for compressed/resident data |
 
-Apple's built-in NTFS on macOS 26 is userspace FSKit and **read-only** (`FSImplementation = UserFS` only). MyNTFS targets write via `am-fs-ntfs` behind KOIO.
+Apple's built-in NTFS on macOS 26 is userspace FSKit and **read-only**. Do not treat AMFI-off or this appex as the normal MyNTFS install.
 
 After building the appex in Xcode:
 
 ```bash
 bash apple/MyNTFSModule/dev-install.sh /path/to/MyNTFSModule.appex
 ```
-
-
-MIT OR Apache-2.0. The write engine uses [`am-fs-ntfs`](https://crates.io/crates/am-fs-ntfs) (MIT/Apache). No GPL NTFS code is linked.

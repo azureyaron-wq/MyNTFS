@@ -4,8 +4,6 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use ntfs_core::WritePolicy;
-use ntfs_vfs::Volume;
 
 #[derive(Parser)]
 #[command(name = "ntfs-fuse", about = "Mount an NTFS image/device via FUSE (Linux)")]
@@ -36,8 +34,8 @@ mod fuse_main {
 
     use anyhow::Result;
     use fuser::{
-        FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
-        ReplyEntry, ReplyStatfs, ReplyWrite, Request,
+        FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
+        ReplyStatfs, Request,
     };
     use ntfs_core::WritePolicy;
     use ntfs_vfs::Volume;
@@ -97,7 +95,7 @@ mod fuse_main {
             }
         }
 
-        fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
+        fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
             if ino == 1 {
                 reply.attr(&Duration::from_secs(1), &dir_attr(1));
                 return;
@@ -116,7 +114,6 @@ mod fuse_main {
             _lock_owner: Option<u64>,
             reply: ReplyData,
         ) {
-            let _ = (offset, size, reply);
             reply.error(libc::ENOSYS);
         }
 
@@ -141,13 +138,15 @@ mod fuse_main {
             };
             let mut idx = 0i64;
             if offset <= 0 {
-                if reply.add(1, idx, FileType::Directory, ".".as_ref()).is_err() {
+                if reply.add(1, idx, FileType::Directory, ".".as_ref()) {
+                    reply.ok();
                     return;
                 }
                 idx += 1;
             }
             if offset <= 1 {
-                if reply.add(1, idx, FileType::Directory, "..".as_ref()).is_err() {
+                if reply.add(1, idx, FileType::Directory, "..".as_ref()) {
+                    reply.ok();
                     return;
                 }
                 idx += 1;
@@ -163,15 +162,15 @@ mod fuse_main {
                 } else {
                     FileType::RegularFile
                 };
-                if reply.add(ino, idx, kind, e.name.as_ref()).is_err() {
-                    return;
+                if reply.add(ino, idx, kind, e.name.as_ref()) {
+                    break;
                 }
                 idx += 1;
             }
             reply.ok();
         }
 
-        fn statfs(&mut self, _req: &Request, reply: ReplyStatfs) {
+        fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
             reply.statfs(4 * 1024, 512, 0, 0, 0, 512, 0, 0);
         }
     }

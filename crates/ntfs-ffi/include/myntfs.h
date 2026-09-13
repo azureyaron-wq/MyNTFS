@@ -35,6 +35,9 @@ MyNtfsVolume *myntfs_mount_fd(int fd, const char *display_path, int writable,
 
 void myntfs_umount(MyNtfsVolume *vol);
 
+/* Flush before Close so Finder sees new files. 0 = ok. */
+int myntfs_sync(MyNtfsVolume *vol);
+
 int myntfs_is_writable(const MyNtfsVolume *vol);
 
 int myntfs_volume_serial(const MyNtfsVolume *vol, uint64_t *out_serial);
@@ -90,6 +93,11 @@ int myntfs_fd_getfl(int fd);
 
 int myntfs_da_slice_mounted(const char *bsd);
 int myntfs_da_ensure_unmounted(char *errbuf, size_t errbuf_len);
+
+/* After da_release: DADiskMount + poll until /Volumes/… (≤10s). Returns 0 and
+ * copies the mount path. Callers must not hold exclusive access. */
+int myntfs_da_mount_finder(const char *bsd, char *pathbuf, size_t pathbuf_len,
+                           char *errbuf, size_t errbuf_len);
 
 #ifdef __cplusplus
 }

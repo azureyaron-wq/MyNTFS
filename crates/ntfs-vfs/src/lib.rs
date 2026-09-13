@@ -451,6 +451,27 @@ impl Volume {
         )
     }
 
+    /// Flush media caches before umount / Finder remount.
+    /// Path images: `sync_data` on the file. USB FdIo: DKIOC / fsync via FileDevice.
+    pub fn sync(&self) -> Result<()> {
+        if !self.writable {
+            return Ok(());
+        }
+        match &self.engine {
+            Engine::Path(_) => {
+                let f = std::fs::File::options().write(true).open(&self.path)?;
+                f.sync_data()?;
+                Ok(())
+            }
+            Engine::Fd(lock) => {
+                let mut io = lock
+                    .lock()
+                    .map_err(|_| Error::Corrupt("fd io lock poisoned".into()))?;
+                io.sync().map_err(Error::Corrupt)
+            }
+        }
+    }
+
     fn require_write(&self) -> Result<()> {
         if self.writable {
             Ok(())

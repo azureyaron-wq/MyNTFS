@@ -180,6 +180,22 @@ pub extern "C" fn myntfs_umount(vol: *mut MyNtfsVolume) {
 }
 
 #[no_mangle]
+pub extern "C" fn myntfs_sync(vol: *mut MyNtfsVolume) -> c_int {
+    if vol.is_null() {
+        set_err("null volume");
+        return -1;
+    }
+    match unsafe { (*vol).vol.sync() } {
+        Ok(()) => 0,
+        Err(e) => {
+            let msg = e.to_string();
+            set_err(&msg);
+            -1
+        }
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn myntfs_is_writable(vol: *const MyNtfsVolume) -> c_int {
     if vol.is_null() {
         return 0;

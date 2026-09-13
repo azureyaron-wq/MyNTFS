@@ -386,6 +386,117 @@ int myntfs_da_hold(const char *bsd, char *errbuf, size_t errbuf_len) {
     return 0;
 }
 
+static int exec_mount(const char *bsd);
+
+static int copy_mount_path(const char *bsd, char *pathbuf, size_t n) {
+    struct statfs *mnts = NULL;
+    int nent = getmntinfo(&mnts, MNT_NOWAIT);
+    if (nent <= 0 || !mnts || !pathbuf || n == 0) {
+        return -1;
+    }
+    char diskdev[64];
+    char rdiskdev[64];
+    snprintf(diskdev, sizeof diskdev, "/dev/%s", bsd);
+    snprintf(rdiskdev, sizeof rdiskdev, "/dev/r%s", bsd);
+    for (int i = 0; i < nent; i++) {
+        if (strcmp(mnts[i].f_mntfromname, diskdev) == 0 ||
+            strcmp(mnts[i].f_mntfromname, rdiskdev) == 0) {
+            if (mnts[i].f_mntonname[0] != '/' ||
+                strncmp(mnts[i].f_mntonname, "/Volumes/", 9) != 0) {
+                continue;
+            }
+            strlcpy(pathbuf, mnts[i].f_mntonname, n);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int myntfs_da_mount_finder(const char *bsd, char *pathbuf, size_t pathbuf_len,
+                           char *errbuf, size_t errbuf_len) {
+    const char *name = bsd_name(bsd);
+    if (!name || !valid_slice(name)) {
+        seterr(errbuf, errbuf_len, "invalid disk slice");
+        return -1;
+    }
+    for (int i = 0; i < 50 && myntfs_da_holding(); i++) {
+        usleep(20000);
+    }
+    if (myntfs_da_holding()) {
+        seterr(errbuf, errbuf_len, "still holding exclusive access");
+        return -1;
+    }
+    if (pathbuf && pathbuf_len) {
+        pathbuf[0] = 0;
+    }
+
+    dispatch_queue_t q = dispatch_queue_create("com.myntfs.damount", DISPATCH_QUEUE_SERIAL);
+    DASessionRef session = DASessionCreate(kCFAllocatorDefault);
+    if (!q || !session) {
+        if (session) {
+            CFRelease(session);
+        }
+        seterr(errbuf, errbuf_len, "could not create DiskArbitration session");
+        return -1;
+    }
+    DASessionSetDispatchQueue(session, q);
+    DADiskRef disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session, name);
+    if (!disk) {
+        DASessionSetDispatchQueue(session, NULL);
+        CFRelease(session);
+        seterr(errbuf, errbuf_len, "unknown BSD disk name");
+        return -1;
+    }
+
+    DaWait w = {0};
+    w.sem = dispatch_semaphore_create(0);
+    w.status = kDAReturnSuccess;
+    DADiskMount(disk, NULL, kDADiskMountOptionDefault, wait_done, &w);
+    char timed[256] = {0};
+    (void)wait_op(w.sem, timed, sizeof timed, 10);
+    if (w.status != kDAReturnSuccess) {
+        exec_mount(name);
+    }
+
+    int ok = -1;
+    for (int i = 0; i < 50; i++) {
+        if (copy_mount_path(name, pathbuf, pathbuf_len) == 0) {
+            ok = 0;
+            break;
+        }
+        if (i == 5 || i == 15) {
+            exec_mount(name);
+        }
+        usleep(200000);
+    }
+
+    DASessionSetDispatchQueue(session, NULL);
+    CFRelease(disk);
+    CFRelease(session);
+
+    if (ok != 0) {
+        seterr(errbuf, errbuf_len,
+               timed[0] ? timed : "Finder remount timed out. Try Disk Utility → Mount.");
+        return -1;
+    }
+    return 0;
+}
+
+static int exec_mount(const char *bsd) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid == 0) {
+        char *argv[] = {"/usr/sbin/diskutil", "mount", (char *)bsd, NULL};
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
 #ifdef MYNTFS_DAHOLD_PROBE
 #include <stdlib.h>
 

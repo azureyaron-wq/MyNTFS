@@ -72,7 +72,7 @@ struct SafetyInfo {
 enum MountBadge: String {
     case none = "Not mounted"
     case readOnly = "Read-Only"
-    case readWrite = "Read-Write"
+    case readWrite = "MyNTFS (read-write) · Finder hidden"
     case blocked = "Write Blocked"
     case finderMount = "Finder (read-only)"
 
@@ -107,6 +107,7 @@ final class VolumeModel: ObservableObject {
     @Published var disks: [DetectedDisk] = []
     @Published var hostBrowseRoot: URL?
     @Published var currentDisk: DetectedDisk?
+    @Published var lastDisk: DetectedDisk?
     @Published var selectedName: String?
     @Published var editorText = ""
     @Published var editorPath = ""
@@ -128,12 +129,25 @@ final class VolumeModel: ObservableObject {
     private var elevateCancelled = false
     private var lastElevateError = ""
     private var workGen = UUID()
+    private var remountGen = UUID()
 
     var isMounted: Bool { handle != nil || hostBrowseRoot != nil }
     var usingHostBrowse: Bool { hostBrowseRoot != nil }
     var canGoUp: Bool { isMounted && cwd != "/" }
 
-    deinit { closeEngine(remountFinder: true) }
+    deinit {
+        if let h = handle {
+            _ = myntfs_sync(h)
+            myntfs_umount(h)
+            handle = nil
+        }
+        myntfs_da_release()
+        if let disk = currentDisk ?? lastDisk {
+            var pathbuf = [CChar](repeating: 0, count: 1024)
+            var err = [CChar](repeating: 0, count: 512)
+            _ = myntfs_da_mount_finder(disk.bsd, &pathbuf, pathbuf.count, &err, err.count)
+        }
+    }
 
     func isBlockDevicePath(_ path: String) -> Bool {
         var st = stat()
@@ -245,12 +259,14 @@ final class VolumeModel: ObservableObject {
             DispatchQueue.main.async {
                 self.busy = false
                 self.busyMessage = ""
-                self.closeEngine(remountFinder: true)
+                self.closeEngine(remountFinder: true, restoreBrowse: false)
+                self.remountGen = UUID()
                 self.wantWrite = false
                 self.deviceWriteConfirmed = false
                 self.cwd = "/"
                 self.volumeTitle = disk.title
                 self.currentDisk = disk
+                self.lastDisk = disk
                 if let folder {
                     self.hostBrowseRoot = folder
                     self.path = folder.path
@@ -300,18 +316,32 @@ final class VolumeModel: ObservableObject {
             guard p.hasPrefix("/Volumes/"), p != "/Volumes", p != "/Volumes/" else { return nil }
             return URL(fileURLWithPath: p, isDirectory: true)
         }
-        if isVolumeMounted(disk.bsd), let url = volumeURL(disk.mountPoint) {
+        if isVolumeMounted(disk.bsd) {
+            if let url = volumeURL(disk.mountPoint) { return url }
+            if let fromInfo = mountPointFromDiskutil(disk.bsd), let url = volumeURL(fromInfo) {
+                return url
+            }
+        }
+        return mountFinderPath(disk)
+    }
+
+    /// DADiskMount + poll (≤10s). Must not be called while DA-holding.
+    func mountFinderPath(_ disk: DetectedDisk) -> URL? {
+        var pathbuf = [CChar](repeating: 0, count: 1024)
+        var err = [CChar](repeating: 0, count: 512)
+        let rc = myntfs_da_mount_finder(disk.bsd, &pathbuf, pathbuf.count, &err, err.count)
+        if rc == 0 {
+            let p = String(cString: pathbuf)
+            if let url = usableMountURL(p) { return url }
+        }
+        let detail = String(cString: err)
+        if !detail.isEmpty {
+            appendLog("Finder remount failed: \(detail)")
+        }
+        if let fromInfo = mountPointFromDiskutil(disk.bsd), let url = usableMountURL(fromInfo) {
             return url
         }
-        _ = runDiskutil(["mount", disk.bsd])
-        Thread.sleep(forTimeInterval: 0.5)
-        if let fromInfo = mountPointFromDiskutil(disk.bsd), let url = volumeURL(fromInfo) {
-            return url
-        }
-        if let url = volumeURL("/Volumes/\(disk.title)") {
-            return url
-        }
-        return usableMountURL(disk.mountPoint)
+        return usableMountURL("/Volumes/\(disk.title)")
     }
 
     func usableMountURL(_ path: String) -> URL? {
@@ -356,7 +386,8 @@ final class VolumeModel: ObservableObject {
     }
 
     func open(url: URL, requestWrite: Bool, allowDeviceWrite: Bool) {
-        close()
+        closeEngine(remountFinder: currentDisk != nil, restoreBrowse: false)
+        remountGen = UUID()
         _ = url.startAccessingSecurityScopedResource()
         scopedURL = url
         path = url.path
@@ -398,37 +429,108 @@ final class VolumeModel: ObservableObject {
     }
 
     func close() {
-        closeEngine(remountFinder: currentDisk != nil)
+        closeEngine(remountFinder: currentDisk != nil, restoreBrowse: true)
     }
 
     func closeVolume() {
-        closeEngine(remountFinder: true)
-        status = "Volume closed. Finder can remount the USB read-only."
+        closeEngine(remountFinder: true, restoreBrowse: true)
     }
 
-    func closeEngine(remountFinder: Bool) {
-        let disk = currentDisk
-        if let h = handle {
-            myntfs_umount(h)
-            handle = nil
-        }
-        myntfs_da_release()
+    func closeEngine(remountFinder: Bool, restoreBrowse: Bool = true) {
+        let disk = currentDisk ?? (remountFinder ? lastDisk : nil)
+        let h = handle
+        handle = nil
+        engineWritable = false
+        wantWrite = false
+        deviceWriteConfirmed = false
+        selectedName = nil
+        cwd = "/"
         if let u = scopedURL {
             u.stopAccessingSecurityScopedResource()
             scopedURL = nil
         }
+
+        let gen = UUID()
+        remountGen = gen
+        if restoreBrowse, remountFinder, disk != nil {
+            busy = true
+            busyCancellable = false
+            mutating = false
+            busyMessage = "Returning the drive to Finder…"
+        }
+
+        let remount = remountFinder
+        let browse = restoreBrowse
+        let capturedDisk = disk
+        let work = {
+            if let h {
+                if myntfs_sync(h) != 0 {
+                    self.appendLog("flush before close: \(self.lastErr())")
+                }
+                myntfs_umount(h)
+            }
+            myntfs_da_release()
+            var spins = 0
+            while myntfs_da_holding() != 0 && spins < 50 {
+                Thread.sleep(forTimeInterval: 0.02)
+                spins += 1
+            }
+            var folder: URL?
+            if remount, let capturedDisk {
+                folder = self.mountFinderPath(capturedDisk)
+            }
+            return folder
+        }
+
+        if remount, let capturedDisk {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let folder = work()
+                DispatchQueue.main.async {
+                    guard self.remountGen == gen else { return }
+                    if browse {
+                        self.applyBrowseRestore(disk: capturedDisk, folder: folder)
+                    }
+                }
+            }
+            if !browse {
+                hostBrowseRoot = nil
+            }
+            return
+        }
+
+        _ = work()
         hostBrowseRoot = nil
         currentDisk = nil
-        selectedName = nil
         entries = []
+        volumeTitle = ""
+        badge = .none
+    }
+
+    func applyBrowseRestore(disk: DetectedDisk, folder: URL?) {
+        busy = false
+        busyMessage = ""
+        lastDisk = disk
+        currentDisk = disk
+        volumeTitle = disk.title
         engineWritable = false
         wantWrite = false
         deviceWriteConfirmed = false
-        badge = .none
         cwd = "/"
-        volumeTitle = ""
-        if remountFinder, let disk, let folder = ensureFinderMounted(disk) {
+        selectedName = nil
+        handle = nil
+        if let folder {
+            hostBrowseRoot = folder
+            path = folder.path
+            badge = .finderMount
+            status = "Finder has \(folder.path) (read-only)"
+            refresh()
             appendLog("Finder remounted \(folder.path) read-only")
+        } else {
+            hostBrowseRoot = nil
+            entries = []
+            badge = .none
+            status = "Could not remount \(disk.title) in Finder. Open Disk Utility and mount \(disk.bsd)."
+            appendLog(status)
         }
     }
 
@@ -564,6 +666,7 @@ final class VolumeModel: ObservableObject {
     }
 
     func revealInFinder(_ row: DirRow) {
+        guard usingHostBrowse, !canMutate, myntfs_da_holding() == 0 else { return }
         if let url = currentHostURL(row.name) {
             NSWorkspace.shared.activateFileViewerSelecting([url])
         }
@@ -780,6 +883,10 @@ final class VolumeModel: ObservableObject {
             enableWritesOnImage(url)
             return
         }
+        if safety.bitlocker {
+            actionError = "Write blocked: BitLocker encryption was detected. Decrypt the volume in Windows first."
+            return
+        }
         guard let disk = currentDisk ?? disks.first(where: { $0.title == volumeTitle }) else {
             actionError = "No disk selected."
             return
@@ -788,7 +895,7 @@ final class VolumeModel: ObservableObject {
         busy = true
         busyCancellable = true
         mutating = false
-        busyMessage = "Taking exclusive access (Finder stay unmounted)…"
+        busyMessage = "Disconnecting from Finder so MyNTFS can write…"
         elevateCancelled = false
         lastElevateError = ""
         let gen = UUID()
@@ -830,23 +937,31 @@ final class VolumeModel: ObservableObject {
             elevateCancelled || workGen != gen
         }
         func fail(_ message: String, remount: Bool) {
+            myntfs_da_release()
+            var folder: URL?
+            if remount {
+                folder = self.mountFinderPath(disk)
+            }
             DispatchQueue.main.async {
                 guard self.workGen == gen else { return }
                 self.busy = false
                 self.busyCancellable = false
                 self.mutating = false
                 self.busyMessage = ""
-                myntfs_da_release()
-                self.actionError = message
                 self.appendLog(message)
-                if remount, let folder = self.ensureFinderMounted(disk) {
-                    self.hostBrowseRoot = folder
-                    self.path = folder.path
-                    self.badge = .finderMount
-                    self.engineWritable = false
-                    self.refresh()
-                    self.appendLog("write failed; remounted Finder at \(folder.path)")
+                if remount {
+                    self.applyBrowseRestore(disk: disk, folder: folder)
                 }
+                self.actionError = message
+            }
+        }
+
+        func cancelledRestore() {
+            myntfs_da_release()
+            let folder = self.mountFinderPath(disk)
+            DispatchQueue.main.async {
+                guard self.workGen == gen else { return }
+                self.applyBrowseRestore(disk: disk, folder: folder)
             }
         }
 
@@ -857,7 +972,7 @@ final class VolumeModel: ObservableObject {
         var err = [CChar](repeating: 0, count: 512)
         let holdRc = myntfs_da_hold(disk.bsd, &err, err.count)
         if cancelled() {
-            if holdRc == 0 { myntfs_da_release() }
+            cancelledRestore()
             return
         }
         if holdRc != 0 {
@@ -872,7 +987,7 @@ final class VolumeModel: ObservableObject {
             return
         }
         if cancelled() {
-            myntfs_da_release()
+            cancelledRestore()
             return
         }
 
@@ -883,7 +998,7 @@ final class VolumeModel: ObservableObject {
         let fd = openWritableRdisk(disk.rdisk)
         if cancelled() {
             if fd >= 0 { Darwin.close(fd) }
-            myntfs_da_release()
+            cancelledRestore()
             return
         }
         if fd < 0 {
@@ -896,7 +1011,10 @@ final class VolumeModel: ObservableObject {
 
         if myntfs_da_ensure_unmounted(&err, err.count) != 0 {
             Darwin.close(fd)
-            if cancelled() { return }
+            if cancelled() {
+                cancelledRestore()
+                return
+            }
             let detail = String(cString: err)
             fail(detail.isEmpty
                  ? "Volume remounted during authorization. Writes were not enabled."
@@ -910,7 +1028,7 @@ final class VolumeModel: ObservableObject {
         appendLog("writable fd=\(fd) getfl=\(fl) pread=\(preadOk) da_hold=\(myntfs_da_holding())")
         if cancelled() {
             Darwin.close(fd)
-            myntfs_da_release()
+            cancelledRestore()
             return
         }
         if !writableFd || !preadOk {
@@ -925,13 +1043,14 @@ final class VolumeModel: ObservableObject {
         }
         if cancelled() {
             Darwin.close(fd)
-            myntfs_da_release()
+            cancelledRestore()
             return
         }
         let mounted = myntfs_mount_fd(fd, disk.rdisk, 1, 1, &err, err.count)
         Darwin.close(fd)
         if cancelled() {
             if let mounted { myntfs_umount(mounted) }
+            cancelledRestore()
             return
         }
         guard let mounted else {
@@ -949,6 +1068,13 @@ final class VolumeModel: ObservableObject {
         DispatchQueue.main.async {
             if self.workGen != gen || self.elevateCancelled {
                 myntfs_umount(mounted)
+                DispatchQueue.global(qos: .userInitiated).async {
+                    myntfs_da_release()
+                    let folder = self.mountFinderPath(disk)
+                    DispatchQueue.main.async {
+                        self.applyBrowseRestore(disk: disk, folder: folder)
+                    }
+                }
                 return
             }
             self.busy = false
@@ -961,6 +1087,7 @@ final class VolumeModel: ObservableObject {
             self.hostBrowseRoot = nil
             self.handle = mounted
             self.currentDisk = disk
+            self.lastDisk = disk
             self.volumeTitle = disk.title
             self.cwd = "/"
             self.path = disk.rdisk
@@ -1097,18 +1224,19 @@ final class VolumeModel: ObservableObject {
         guard busyCancellable, !mutating else { return }
         elevateCancelled = true
         workGen = UUID()
-        busy = false
         busyCancellable = false
-        busyMessage = ""
+        busyMessage = "Returning the drive to Finder…"
         myntfs_da_release()
         appendLog("enable-writes cancelled; releasing exclusive access")
-        if let disk = currentDisk ?? disks.first(where: { $0.title == volumeTitle }) {
-            if let folder = ensureFinderMounted(disk) {
-                hostBrowseRoot = folder
-                path = folder.path
-                badge = .finderMount
-                engineWritable = false
-                refresh()
+        guard let disk = currentDisk ?? lastDisk ?? disks.first(where: { $0.title == volumeTitle }) else {
+            busy = false
+            busyMessage = ""
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let folder = self.mountFinderPath(disk)
+            DispatchQueue.main.async {
+                self.applyBrowseRestore(disk: disk, folder: folder)
             }
         }
     }
@@ -1227,7 +1355,9 @@ struct ContentView: View {
         }
         .alert("Enable writes on \(model.volumeTitle.isEmpty ? "this disk" : model.volumeTitle)?", isPresented: $model.showEnableWrite) {
             Button("Cancel", role: .cancel) {}
-            Button("Enable writes", role: .destructive) { model.enableWrites() }
+            if !(model.safety.bitlocker && !model.enableWritesIsImage) {
+                Button("Enable writes", role: .destructive) { model.enableWrites() }
+            }
         } message: {
             Text(enableWriteMessage)
         }
@@ -1266,16 +1396,19 @@ struct ContentView: View {
             ]
         } else {
             lines = [
-                "Finder will force-unmount this USB volume so MyNTFS can keep exclusive access.",
-                "macOS will ask for your password to open the raw disk.",
+                "Finder will disappear for this USB until you Close volume. That is exclusive access, not a crash.",
+                "macOS will ask for your admin password once for this Enable writes. MyNTFS does not keep that authorization.",
                 "Do not do this if you cannot replace the files on the drive."
             ]
         }
         let safety = model.safety.summaryLines.filter { $0 != "No safety warnings" }
         if !safety.isEmpty {
-            lines.append("Safety: " + safety.joined(separator: "; ") + ".")
+            lines.append(contentsOf: safety.map { "• \($0)" })
         }
-        return lines.joined(separator: " ")
+        if model.safety.bitlocker && !model.enableWritesIsImage {
+            lines.append("BitLocker is present. Enable writes is disabled until you decrypt in Windows.")
+        }
+        return lines.joined(separator: "\n\n")
     }
 
     private var explorerBar: some View {
@@ -1317,7 +1450,7 @@ struct ContentView: View {
                 if !model.canMutate && model.isMounted {
                     Button("Enable writes…") { model.showEnableWrite = true }
                         .buttonStyle(.borderedProminent)
-                        .disabled(model.busy)
+                        .disabled(model.busy || (model.safety.bitlocker && !model.enableWritesIsImage))
                 }
             }
             .padding(.horizontal, 12)
@@ -1348,12 +1481,23 @@ struct ContentView: View {
 
     private var fileList: some View {
         VStack(spacing: 0) {
-            if !model.canMutate && model.isMounted {
+            if model.canMutate {
+                HStack {
+                    Text("MyNTFS has exclusive access. Finder cannot show this drive until you Close volume.")
+                        .font(.caption)
+                    Spacer()
+                    Button("Close volume") { model.closeVolume() }
+                        .disabled(model.busy)
+                }
+                .padding(8)
+                .background(Color.green.opacity(0.12))
+            } else if !model.canMutate && model.isMounted {
                 HStack {
                     Text("Read-only until you enable writes. Apple’s NTFS mount cannot create or delete files.")
                         .font(.caption)
                     Spacer()
                     Button("Enable writes…") { model.showEnableWrite = true }
+                        .disabled(model.busy || (model.safety.bitlocker && !model.enableWritesIsImage))
                 }
                 .padding(8)
                 .background(Color.orange.opacity(0.15))
@@ -1395,7 +1539,7 @@ struct ContentView: View {
                                 copyTarget = row
                                 showCopySave = true
                             }
-                            if model.usingHostBrowse {
+                            if model.usingHostBrowse && !model.canMutate {
                                 Button("Reveal in Finder") { model.revealInFinder(row) }
                             }
                             if model.canMutate {

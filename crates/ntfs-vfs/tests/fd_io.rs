@@ -46,6 +46,7 @@ fn mount_from_fd_after_path_unlinked() {
 
     vol.create_file("/", "fd.txt").unwrap();
     vol.write_contents("/fd.txt", b"owned-fd").unwrap();
+    vol.sync().unwrap();
     vol.rename("/fd.txt", "renamed.txt").unwrap();
     let mut buf = [0u8; 16];
     let n = vol.read("/renamed.txt", 0, &mut buf).unwrap();

@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test-macos:
     runs-on: macos-14
@@ -19,5 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install FUSE headers
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev pkg-config
       - run: cargo test -p ntfs-core -p ntfs-io -p ntfs-vfs
       - run: cargo build -p ntfs-fuse --features fuse

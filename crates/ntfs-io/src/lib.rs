@@ -231,18 +231,24 @@ pub fn dup_owned_file(fd: i32, writable: bool) -> Result<std::fs::File> {
     Ok(unsafe { std::fs::File::from_raw_fd(duped) })
 }
 
-fn detect_logical_block_size(file: &std::fs::File, meta_len: u64) -> u32 {
-    if meta_len > 0 {
+fn detect_logical_block_size(file: &std::fs::File, _device_size: u64) -> u32 {
+    // Key off stat size, NOT ioctl/device size. Callers often pass
+    // `device_file_size()` (tens of GB on /dev/rdisk*), which incorrectly
+    // disabled alignment and caused 1-byte $MFT:$Bitmap pread → EINVAL.
+    let stat_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if stat_len > 0 {
+        // Regular file — no forced logical-block bounce.
         return 0;
     }
     #[cfg(target_os = "macos")]
     {
-        macos_device_logical_block_size(file).unwrap_or(0)
+        // Character/block device (rdisk): arm aligned I/O.
+        macos_device_logical_block_size(file).unwrap_or(512)
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = file;
-        0
+        512
     }
 }
 
@@ -554,6 +560,15 @@ mod alignment_tests {
         let mut buf = [0u8; 1];
         aligned_read_at(&file, BS, 1, &mut buf).unwrap();
         assert_eq!(buf[0], 1);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn detect_uses_stat_not_device_size() {
+        use super::detect_logical_block_size;
+        let (path, file) = pattern_file();
+        // Regular file: even if a huge "device size" is passed, stay unaligned (0).
+        assert_eq!(detect_logical_block_size(&file, 16_000_000_000), 0);
         cleanup(&path);
     }
 

@@ -2,6 +2,8 @@
 /testdata/*.img
 /testdata/golden/*.img
 /apple/MyNTFS.app
+**/*.app/
+*.xcarchive
 **/*.rs.bk
 **/**/._*
 .DS_Store

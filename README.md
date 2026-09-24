@@ -1,8 +1,14 @@
 # MyNTFS
 
-Native macOS + Linux NTFS read/write stack built on a permissive Rust engine.
+Open-source, permissive NTFS **explorer + explicit USB write** for Mac/Linux — local app/CLI, no GPL driver stack; **experimental writes**, not a notarized Finder automount product.
 
-**License:** [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE) (`SPDX-License-Identifier: MIT OR Apache-2.0`).
+> **Experimental / pre-1.0.** Write support can **corrupt or destroy** volume data. Backup first. Use **disposable USB sticks** for write tests. The software is provided **AS IS**, without warranty of any kind — see [LICENSE](LICENSE).
+>
+> This is **not** a notarized Finder automount replacement for Paragon/Tuxera. There are **no** official binary GitHub Releases yet. Clone and **build from source**.
+
+NTFS is a trademark of Microsoft Corporation. MyNTFS is an independent project and is **not affiliated with, endorsed by, or sponsored by Microsoft**.
+
+**License:** [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE) (`SPDX-License-Identifier: MIT OR Apache-2.0`). See also [NOTICE](NOTICE) and [docs/IP.md](docs/IP.md).
 
 The write engine uses [`am-fs-ntfs`](https://crates.io/crates/am-fs-ntfs) (MIT/Apache). No GPL NTFS code is linked.
 
@@ -11,14 +17,14 @@ The write engine uses [`am-fs-ntfs`](https://crates.io/crates/am-fs-ntfs) (MIT/A
 ```bash
 git clone https://github.com/azureyaron-wq/MyNTFS.git
 cd MyNTFS
-cargo test -p ntfs-core -p ntfs-io -p ntfs-vfs
+cargo test --workspace
 ```
 
 The git tree is **source only**. Do not expect `target/`, `graphify-out/`, or a prebuilt Mac app in the clone.
 
 ## Layout
 
-- `crates/ntfs-core` — clean-room parsers, safety probes, `BlockDevice` trait
+- `crates/ntfs-core` — parsers, safety probes, `BlockDevice` trait
 - `crates/ntfs-io` — image/raw device I/O, DiskArbitration helpers (macOS)
 - `crates/ntfs-vfs` — mounted volume API (wraps `am-fs-ntfs` for read/write)
 - `crates/ntfs-ffi` — C ABI (`myntfs_*`) for Swift / FSKit
@@ -46,6 +52,8 @@ bash scripts/build-golden-images.sh
 
 Use **read-only** commands only on drives with user data (`ls`, `stat`, `cat`, `cp` out to your Mac). The CLI refuses writes to `/dev/*` unless you pass a hidden `--i-understand-device-write` flag.
 
+Writes are **experimental**. Prefer a blank / disposable USB. After a crash or a failed write session, run Windows `chkdsk`. See [SECURITY.md](SECURITY.md).
+
 ```bash
 ./target/debug/ntfs-cli probe          # lists NTFS disks, mount state, raw access
 # Optional: unmount for engine test (disruptive — remount with diskutil mount diskNsY)
@@ -64,9 +72,9 @@ bash apple/MyNTFS/build.sh
 open apple/MyNTFS.app
 ```
 
-`apple/MyNTFS.app` is a **local build artifact**. It is gitignored and is not a notarized GitHub Release. Use a disposable USB stick for write tests.
+`apple/MyNTFS.app` is a **local build artifact**. It is gitignored, **ad-hoc signed** (`codesign -s -`), and is **not** a Gatekeeper-trusted or notarized GitHub Release. Use a disposable USB stick for write tests.
 
-The dedicated app works today without special entitlements. Open NTFS disk images, or Enable writes on an external NTFS USB (macOS will ask for your password each time).
+The dedicated app works today without special entitlements. Open NTFS disk images, or Enable writes on an **external** NTFS USB (macOS will ask for your password each time). Finder staying empty during Enable writes is exclusive access, not a bypass.
 
 ## Advanced — FSKit extension (lab only)
 
@@ -86,3 +94,11 @@ After building the appex in Xcode:
 ```bash
 bash apple/MyNTFSModule/dev-install.sh /path/to/MyNTFSModule.appex
 ```
+
+## Legal
+
+- Dual license: MIT OR Apache-2.0 ([LICENSE](LICENSE), [LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE))
+- Third-party attribution: [NOTICE](NOTICE)
+- Interoperability / IP notes: [docs/IP.md](docs/IP.md)
+- Vulnerability reports: [SECURITY.md](SECURITY.md)
+- Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)

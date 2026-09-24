@@ -24,6 +24,33 @@ FSKit as a product mount, and shipping a notarized `.app`.
 osascript-as-root, or any “always allow” coaching. Those are lab-only notes
 for the optional FSKit experiment, not normal install.
 
+## Non-journaled writer
+
+MyNTFS does **not** participate in NTFS `$LogFile` journaling the way Windows
+does. On Close / unmount commit it may reset `$LogFile` and clear the dirty
+bit so Windows will mount the volume. A crash or a bug mid-session can leave
+inconsistency **without** the usual journal-replay warning.
+
+After problems, run Windows `chkdsk`. Use disposable media for write tests.
+Do not treat a successful remount as proof that the volume is consistent.
+
+## Experimental grow / index paths
+
+`attr_grow` and `index_grow` (non-resident `$DATA` growth and `$INDEX_ROOT` →
+`$INDEX_ALLOCATION` promotion) are **experimental**. Large files and
+directories with many entries are an elevated corruption risk.
+
+Directory index currently promotes to a **single** INDX leaf. There is no full
+B+ tree split yet. Folders that would need multiple index blocks are outside
+the supported write shape.
+
+## Binaries
+
+Local `apple/MyNTFS` builds use **ad-hoc** `codesign -s -`. They are **not**
+Gatekeeper-trusted and are **not** notarized. There are **no** supported
+GitHub Release binaries until Developer ID + notarization exist. Clone and
+build from source.
+
 ## Reporting a vulnerability
 
 Email **azureyaron@gmail.com** with:

@@ -16,9 +16,8 @@ mk() {
 }
 
 mk basic 67108864 "Basic"
-mk unicode 67108864 "Unicode"
 
-# Populate basic volume
+# Populate basic volume. unicode.img is not generated: unused by tests/CI.
 RW="$ROOT/target/debug/ntfs-cli"
 "$RW" touch testdata/golden/basic.img / hello.txt
 "$RW" write testdata/golden/basic.img /hello.txt --content "Hello NTFS from MyNTFS"

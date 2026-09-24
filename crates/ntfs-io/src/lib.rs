@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use ntfs_core::{BlockDevice, Error, Result};
 
@@ -497,103 +496,6 @@ fn linux_device_size(file: &std::fs::File) -> Option<u64> {
         }
     }
     Some(size)
-}
-
-/// Bounded LRU of metadata pages. Hard cap in bytes keeps idle memory flat.
-pub struct MetaCache {
-    cap_bytes: usize,
-    inner: Mutex<lru_impl::Lru>,
-}
-
-impl MetaCache {
-    pub fn new(cap_bytes: usize) -> Self {
-        Self {
-            cap_bytes: cap_bytes.max(64 * 1024),
-            inner: Mutex::new(lru_impl::Lru::new()),
-        }
-    }
-
-    pub fn get(&self, offset: u64) -> Option<Vec<u8>> {
-        self.inner.lock().ok()?.get(offset)
-    }
-
-    pub fn put(&self, offset: u64, data: Vec<u8>) {
-        if let Ok(mut g) = self.inner.lock() {
-            g.put(offset, data, self.cap_bytes);
-        }
-    }
-
-    pub fn invalidate(&self, offset: u64) {
-        if let Ok(mut g) = self.inner.lock() {
-            g.remove(offset);
-        }
-    }
-
-    pub fn clear(&self) {
-        if let Ok(mut g) = self.inner.lock() {
-            g.clear();
-        }
-    }
-}
-
-mod lru_impl {
-    use std::collections::{HashMap, VecDeque};
-
-    pub struct Lru {
-        map: HashMap<u64, Vec<u8>>,
-        order: VecDeque<u64>,
-        bytes: usize,
-    }
-
-    impl Lru {
-        pub fn new() -> Self {
-            Self {
-                map: HashMap::new(),
-                order: VecDeque::new(),
-                bytes: 0,
-            }
-        }
-
-        pub fn get(&mut self, k: u64) -> Option<Vec<u8>> {
-            if let Some(v) = self.map.get(&k) {
-                if let Some(i) = self.order.iter().position(|x| *x == k) {
-                    self.order.remove(i);
-                    self.order.push_back(k);
-                }
-                return Some(v.clone());
-            }
-            None
-        }
-
-        pub fn put(&mut self, k: u64, v: Vec<u8>, cap: usize) {
-            self.remove(k);
-            self.bytes += v.len();
-            self.map.insert(k, v);
-            self.order.push_back(k);
-            while self.bytes > cap {
-                if let Some(old) = self.order.pop_front() {
-                    if let Some(d) = self.map.remove(&old) {
-                        self.bytes = self.bytes.saturating_sub(d.len());
-                    }
-                } else {
-                    break;
-                }
-            }
-        }
-
-        pub fn remove(&mut self, k: u64) {
-            if let Some(d) = self.map.remove(&k) {
-                self.bytes = self.bytes.saturating_sub(d.len());
-                self.order.retain(|x| *x != k);
-            }
-        }
-
-        pub fn clear(&mut self) {
-            self.map.clear();
-            self.order.clear();
-            self.bytes = 0;
-        }
-    }
 }
 
 pub mod diskarb;

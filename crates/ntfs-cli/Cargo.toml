@@ -17,4 +17,3 @@ ntfs-vfs.workspace = true
 am-fs-ntfs.workspace = true
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-hex = "0.4"

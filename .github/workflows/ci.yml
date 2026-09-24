@@ -15,7 +15,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
       - run: cargo build -p ntfs-cli --release
-      - run: bash scripts/build-golden-images.sh
 
   test-linux:
     runs-on: ubuntu-latest

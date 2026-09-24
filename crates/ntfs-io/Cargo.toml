@@ -3,7 +3,7 @@ name = "ntfs-io"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Block-device backends: image files, raw disks, LRU metadata cache"
+description = "Block-device backends: image files, raw disks"
 rust-version.workspace = true
 
 [dependencies]

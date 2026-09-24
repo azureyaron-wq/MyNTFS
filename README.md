@@ -42,7 +42,7 @@ cargo build --release
 ./target/release/ntfs-cli ls testdata/vol.img /
 ```
 
-Golden images:
+Golden images are **local/optional**, gitignored, and regenerable. CI does **not** build them and does **not** exercise real USB.
 
 ```bash
 bash scripts/build-golden-images.sh

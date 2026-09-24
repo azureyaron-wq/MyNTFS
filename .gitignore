@@ -13,7 +13,26 @@
 /fuzz/corpus
 /fuzz/artifacts
 .env
+.env.*
 .idea
 .vscode
 .cursor/
 /CURSOR_*.md
+
+# Archives / disk images / dumps (broader than testdata/)
+*.img
+*.dmg
+*.pkg
+*.zip
+
+# Secrets / keys (belt and suspenders)
+*.pem
+*.p12
+*.key
+auth*.log
+
+# Xcode / Apple noise (no xcproj today; still prevent accidents)
+**/xcuserdata/
+*.xcuserstate
+DerivedData/
+**/*.dSYM/

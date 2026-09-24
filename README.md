@@ -2,7 +2,7 @@
 
 Open-source, permissive NTFS **explorer + explicit USB write** for Mac/Linux — local app/CLI, no GPL driver stack; **experimental writes**, not a notarized Finder automount product.
 
-> **Experimental / pre-1.0.** Write support can **corrupt or destroy** volume data. Backup first. Use **disposable USB sticks** for write tests. The software is provided **AS IS**, without warranty of any kind — see [LICENSE](LICENSE).
+> **Experimental / pre-1.0.** Write support can **corrupt or destroy** volume data. Backup first. Use **disposable USB sticks** for write tests. The software is provided **AS IS**, without warranty of any kind — see [LICENSE-MIT](LICENSE-MIT) or [LICENSE-APACHE](LICENSE-APACHE).
 >
 > This is **not** a notarized Finder automount replacement for Paragon/Tuxera. There are **no** official binary GitHub Releases yet. Clone and **build from source**.
 
@@ -97,7 +97,7 @@ bash apple/MyNTFSModule/dev-install.sh /path/to/MyNTFSModule.appex
 
 ## Legal
 
-- Dual license: MIT OR Apache-2.0 ([LICENSE](LICENSE), [LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE))
+- Dual license: MIT OR Apache-2.0 ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE))
 - Third-party attribution: [NOTICE](NOTICE)
 - Interoperability / IP notes: [docs/IP.md](docs/IP.md)
 - Vulnerability reports: [SECURITY.md](SECURITY.md)

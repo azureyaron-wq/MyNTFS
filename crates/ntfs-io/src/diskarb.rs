@@ -11,26 +11,163 @@ mod imp {
     use std::process::Command;
 
     pub fn list_ntfs_bsd_names() -> Result<Vec<String>> {
+        Ok(list_external_volumes()?
+            .into_iter()
+            .filter(|v| v.is_ntfs)
+            .map(|v| v.bsd)
+            .collect())
+    }
+
+    /// Every mountable volume on an external/removable disk (NTFS, FAT32, exFAT, …).
+    pub fn list_external_volumes() -> Result<Vec<super::ListedVolume>> {
         let mut out = Vec::new();
         if let Ok(list) = diskutil(&["list"]) {
             let list_text = String::from_utf8_lossy(&list);
-            for line in list_text.lines() {
-                let lower = line.to_ascii_lowercase();
-                if lower.contains("ntfs") || lower.contains("windows_ntfs") {
-                    if let Some(id) = line.split_whitespace().last() {
-                        if id.starts_with("disk") {
-                            out.push(id.to_string());
-                        }
-                    }
+            for id in parse_external_slice_ids(&list_text) {
+                let Some(info) = diskutil_best_effort(&["info", &id]) else {
+                    continue;
+                };
+                if !keep_listed_volume(&info) {
+                    continue;
                 }
+                out.push(super::ListedVolume {
+                    is_ntfs: volume_is_ntfs(&info),
+                    fs_kind: fs_kind_from_info(&info),
+                    bsd: id,
+                });
             }
         }
         for bsd in ntfs_from_mount_table() {
-            out.push(bsd);
+            if out.iter().any(|v| v.bsd == bsd) {
+                continue;
+            }
+            if is_system_volume(&bsd) {
+                continue;
+            }
+            out.push(super::ListedVolume {
+                bsd,
+                is_ntfs: true,
+                fs_kind: "NTFS".to_string(),
+            });
         }
-        out.sort();
-        out.dedup();
+        out.sort_by(|a, b| a.bsd.cmp(&b.bsd));
+        out.dedup_by(|a, b| a.bsd == b.bsd);
         Ok(out)
+    }
+
+    pub fn parse_external_slice_ids(list_text: &str) -> Vec<String> {
+        let mut external_wholes = std::collections::HashSet::new();
+        let mut current_external = false;
+        let mut ids = Vec::new();
+        for line in list_text.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("/dev/") {
+                let bsd = rest.split_whitespace().next().unwrap_or("");
+                current_external = trimmed.contains("(external");
+                if current_external {
+                    external_wholes.insert(whole_disk(bsd));
+                }
+                continue;
+            }
+            if let Some(idx) = trimmed.find("Physical Store ") {
+                let store = trimmed[idx + "Physical Store ".len()..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                if external_wholes.contains(&whole_disk(store)) {
+                    current_external = true;
+                }
+                continue;
+            }
+            if let Some(id) = trimmed.split_whitespace().last() {
+                if valid_slice(id) && current_external {
+                    ids.push(id.to_string());
+                }
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    pub fn keep_listed_volume(info: &str) -> bool {
+        if is_system_from_info(info) {
+            return false;
+        }
+        if field(info, "Whole:").is_some_and(|v| v.eq_ignore_ascii_case("yes")) {
+            return false;
+        }
+        let ptype = field(info, "Partition Type:").unwrap_or_default();
+        let pl = ptype.to_ascii_lowercase();
+        if pl == "efi"
+            || pl.contains("reserved")
+            || pl.contains("recovery")
+            || pl.contains("guid_partition")
+            || pl.contains("fdisk_partition")
+            || (pl.contains("apple_boot") || pl.contains("apple_apfs_isc"))
+        {
+            return false;
+        }
+        let personality = field(info, "File System Personality:")
+            .filter(|s| !s.eq_ignore_ascii_case("not applicable"))
+            .unwrap_or_default();
+        let bundle = field(info, "Type (Bundle):")
+            .filter(|s| !s.eq_ignore_ascii_case("not applicable"))
+            .unwrap_or_default();
+        if personality.is_empty() && bundle.is_empty() {
+            return false;
+        }
+        let vol_name = field(info, "Volume Name:").unwrap_or_default();
+        if vol_name.eq_ignore_ascii_case("EFI") && !volume_is_ntfs(info) {
+            return false;
+        }
+        true
+    }
+
+    pub fn volume_is_ntfs(info: &str) -> bool {
+        let hay = format!(
+            "{} {} {}",
+            field(info, "File System Personality:").unwrap_or_default(),
+            field(info, "Type (Bundle):").unwrap_or_default(),
+            field(info, "Partition Type:").unwrap_or_default()
+        )
+        .to_ascii_lowercase();
+        hay.contains("ntfs")
+    }
+
+    pub fn fs_kind_from_info(info: &str) -> String {
+        if volume_is_ntfs(info) {
+            return "NTFS".to_string();
+        }
+        let personality = field(info, "File System Personality:").unwrap_or_default();
+        let bundle = field(info, "Type (Bundle):")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let visible = field(info, "Name (User Visible):").unwrap_or_default();
+        let pl = personality.to_ascii_lowercase();
+        let vl = visible.to_ascii_lowercase();
+        if pl.contains("fat32") || vl.contains("fat32") || bundle == "msdos" {
+            return "FAT32".to_string();
+        }
+        if pl.contains("exfat") || bundle == "exfat" {
+            return "exFAT".to_string();
+        }
+        if pl.contains("apfs") || bundle == "apfs" {
+            return "APFS".to_string();
+        }
+        if pl.contains("hfs") || bundle == "hfs" {
+            return "HFS+".to_string();
+        }
+        if pl.contains("fat") {
+            return "FAT".to_string();
+        }
+        if !personality.is_empty() && !personality.eq_ignore_ascii_case("not applicable") {
+            return personality;
+        }
+        if !visible.is_empty() {
+            return visible;
+        }
+        "Unknown".to_string()
     }
 
     fn ntfs_from_mount_table() -> Vec<String> {
@@ -75,7 +212,7 @@ mod imp {
                 }
             }
         }
-        format!("NTFS USB ({bsd})")
+        format!("USB ({bsd})")
     }
 
     pub fn unmount_and_claim(bsd: &str) -> Result<()> {
@@ -138,11 +275,14 @@ mod imp {
         else {
             return true;
         };
-        let text = String::from_utf8_lossy(&out.stdout);
-        let internal = field(&text, "Internal:").is_some_and(|v| v.eq_ignore_ascii_case("yes"));
-        let loc = field(&text, "Device Location:").is_some_and(|v| v.eq_ignore_ascii_case("internal"));
-        let boot = field(&text, "Boot Volume:").is_some_and(|v| v.eq_ignore_ascii_case("yes"));
-        let mp = field(&text, "Mount Point:").unwrap_or_default();
+        is_system_from_info(&String::from_utf8_lossy(&out.stdout))
+    }
+
+    fn is_system_from_info(text: &str) -> bool {
+        let internal = field(text, "Internal:").is_some_and(|v| v.eq_ignore_ascii_case("yes"));
+        let loc = field(text, "Device Location:").is_some_and(|v| v.eq_ignore_ascii_case("internal"));
+        let boot = field(text, "Boot Volume:").is_some_and(|v| v.eq_ignore_ascii_case("yes"));
+        let mp = field(text, "Mount Point:").unwrap_or_default();
         let system_mp = mp == "/" || mp.starts_with("/System/Volumes/");
         internal || loc || boot || system_mp
     }
@@ -270,6 +410,9 @@ mod imp {
     pub fn list_ntfs_bsd_names() -> Result<Vec<String>> {
         Ok(Vec::new())
     }
+    pub fn list_external_volumes() -> Result<Vec<super::ListedVolume>> {
+        Ok(Vec::new())
+    }
     pub fn unmount_and_claim(_bsd: &str) -> Result<()> {
         Ok(())
     }
@@ -311,6 +454,13 @@ mod imp {
 pub use imp::*;
 
 #[derive(Debug, Clone)]
+pub struct ListedVolume {
+    pub bsd: String,
+    pub is_ntfs: bool,
+    pub fs_kind: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct DiskSummary {
     pub bsd: String,
     pub volume_name: Option<String>,
@@ -345,6 +495,92 @@ mod tests {
                 friendly_volume_name(Some("Backup"), Some("/Volumes/Untitled"), "disk4s1"),
                 "Backup"
             );
+            let list = r#"
+/dev/disk0 (internal, physical):
+   #:                       TYPE NAME                    SIZE       IDENTIFIER
+   0:      GUID_partition_scheme                        *500.3 GB   disk0
+   1:             Apple_APFS_ISC Container disk2         524.3 MB   disk0s1
+   2:                 Apple_APFS Container disk3         494.4 GB   disk0s2
+
+/dev/disk4 (external, physical):
+   #:                       TYPE NAME                    SIZE       IDENTIFIER
+   0:     FDisk_partition_scheme                        *15.6 GB    disk4
+   1:               Windows_NTFS                         15.6 GB    disk4s1
+
+/dev/disk5 (external, physical):
+   #:                       TYPE NAME                    SIZE       IDENTIFIER
+   0:     FDisk_partition_scheme                        *15.7 GB    disk5
+   1:             Windows_FAT_32 4825                    15.7 GB    disk5s1
+"#;
+            assert_eq!(
+                parse_external_slice_ids(list),
+                vec!["disk4s1".to_string(), "disk5s1".to_string()]
+            );
+            let apfs = r#"
+/dev/disk6 (external, physical):
+   0:      GUID_partition_scheme                        *31.0 GB   disk6
+   1:                        EFI EFI                     209.7 MB   disk6s1
+   2:                 Apple_APFS Container disk7         30.8 GB    disk6s2
+
+/dev/disk7 (synthesized):
+   0:      APFS Container Scheme -                      +30.8 GB   disk7
+                                 Physical Store disk6s2
+   1:                APFS Volume Stick                   11.2 GB    disk7s1
+"#;
+            assert_eq!(
+                parse_external_slice_ids(apfs),
+                vec![
+                    "disk6s1".to_string(),
+                    "disk6s2".to_string(),
+                    "disk7s1".to_string()
+                ]
+            );
+            let fat = "\
+File System Personality:   MS-DOS FAT32
+Type (Bundle):             msdos
+Partition Type:            Windows_FAT_32
+Name (User Visible):       MS-DOS (FAT32)
+Device Location:           External
+Whole:                     No
+";
+            assert!(!volume_is_ntfs(fat));
+            assert_eq!(fs_kind_from_info(fat), "FAT32");
+            assert!(keep_listed_volume(fat));
+            let ntfs = "\
+File System Personality:   NTFS
+Type (Bundle):             ntfs
+Partition Type:            Windows_NTFS
+Device Location:           External
+Whole:                     No
+";
+            assert!(volume_is_ntfs(ntfs));
+            assert_eq!(fs_kind_from_info(ntfs), "NTFS");
+            let efi = "\
+Volume Name:               EFI
+File System Personality:   MS-DOS FAT32
+Type (Bundle):             msdos
+Partition Type:            EFI
+Device Location:           External
+Whole:                     No
+";
+            assert!(!keep_listed_volume(efi));
+            let internal = "\
+File System Personality:   NTFS
+Type (Bundle):             ntfs
+Partition Type:            Windows_NTFS
+Device Location:           Internal
+Internal:                  Yes
+Whole:                     No
+";
+            assert!(!keep_listed_volume(internal));
+            let vols = list_external_volumes().expect("list external volumes");
+            for v in &vols {
+                assert!(
+                    !v.bsd.starts_with("disk0"),
+                    "internal disk leaked into list: {}",
+                    v.bsd
+                );
+            }
         }
     }
 

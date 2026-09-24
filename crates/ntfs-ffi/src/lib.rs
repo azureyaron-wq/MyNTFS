@@ -6,11 +6,9 @@ use std::os::raw::{c_char, c_int};
 use std::path::Path;
 use std::ptr;
 
-use ntfs_core::{WritePolicy, Result as CoreResult};
+use ntfs_core::{Result as CoreResult, WritePolicy};
 use ntfs_io::diskarb;
-use ntfs_vfs::{
-    copy_in, copy_out, device_gate::DeviceWriteConfirm, format_image, Volume,
-};
+use ntfs_vfs::{copy_in, copy_out, device_gate::DeviceWriteConfirm, format_image, Volume};
 
 thread_local! {
     static LAST_ERR: RefCell<CString> = RefCell::new(CString::new("").unwrap());
@@ -185,7 +183,7 @@ pub extern "C" fn myntfs_sync(vol: *mut MyNtfsVolume) -> c_int {
         set_err("null volume");
         return -1;
     }
-    match unsafe { (*vol).vol.sync() } {
+    match unsafe { (*vol).vol.commit_for_unmount() } {
         Ok(()) => 0,
         Err(e) => {
             let msg = e.to_string();
@@ -215,6 +213,30 @@ pub extern "C" fn myntfs_volume_serial(vol: *const MyNtfsVolume, out_serial: *mu
         return 0;
     }
     -1
+}
+
+#[no_mangle]
+pub extern "C" fn myntfs_volume_space(
+    vol: *mut MyNtfsVolume,
+    out_total: *mut u64,
+    out_free: *mut u64,
+) -> c_int {
+    if vol.is_null() || out_total.is_null() || out_free.is_null() {
+        return -1;
+    }
+    match unsafe { (*vol).vol.volume_space() } {
+        Ok((total, free)) => {
+            unsafe {
+                *out_total = total;
+                *out_free = free;
+            }
+            0
+        }
+        Err(e) => {
+            set_err(e.to_string());
+            -1
+        }
+    }
 }
 
 #[no_mangle]
@@ -313,7 +335,11 @@ pub extern "C" fn myntfs_read(
 }
 
 #[no_mangle]
-pub extern "C" fn myntfs_stat_size(vol: *mut MyNtfsVolume, path: *const c_char, is_dir: *mut c_int) -> i64 {
+pub extern "C" fn myntfs_stat_size(
+    vol: *mut MyNtfsVolume,
+    path: *const c_char,
+    is_dir: *mut c_int,
+) -> i64 {
     if vol.is_null() || path.is_null() {
         set_err("null argument");
         return -1;
@@ -339,15 +365,21 @@ pub extern "C" fn myntfs_stat_size(vol: *mut MyNtfsVolume, path: *const c_char, 
 }
 
 #[no_mangle]
-pub extern "C" fn myntfs_mkdir(vol: *mut MyNtfsVolume, parent: *const c_char, name: *const c_char) -> c_int {
+pub extern "C" fn myntfs_mkdir(
+    vol: *mut MyNtfsVolume,
+    parent: *const c_char,
+    name: *const c_char,
+) -> c_int {
     ffi_write(vol, parent, name, |v, p, n| v.mkdir(p, n).map(|_| ()))
 }
 
 #[no_mangle]
-pub extern "C" fn myntfs_create(vol: *mut MyNtfsVolume, parent: *const c_char, name: *const c_char) -> c_int {
-    ffi_write(vol, parent, name, |v, p, n| {
-        v.create_file(p, n).map(|_| ())
-    })
+pub extern "C" fn myntfs_create(
+    vol: *mut MyNtfsVolume,
+    parent: *const c_char,
+    name: *const c_char,
+) -> c_int {
+    ffi_write(vol, parent, name, |v, p, n| v.create_file(p, n).map(|_| ()))
 }
 
 #[no_mangle]
@@ -403,6 +435,25 @@ pub extern "C" fn myntfs_rmdir(vol: *mut MyNtfsVolume, path: *const c_char) -> c
         return -1;
     };
     match unsafe { (*vol).vol.rmdir(p) } {
+        Ok(()) => 0,
+        Err(e) => {
+            set_err(e.to_string());
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn myntfs_remove(vol: *mut MyNtfsVolume, path: *const c_char) -> c_int {
+    if vol.is_null() || path.is_null() {
+        set_err("null argument");
+        return -1;
+    }
+    let Ok(p) = (unsafe { CStr::from_ptr(path) }).to_str() else {
+        set_err("invalid path");
+        return -1;
+    };
+    match unsafe { (*vol).vol.remove(p) } {
         Ok(()) => 0,
         Err(e) => {
             set_err(e.to_string());
@@ -471,7 +522,12 @@ pub extern "C" fn myntfs_copy_out(
     let Ok(dest) = (unsafe { CStr::from_ptr(dest_host_path) }).to_str() else {
         return -1;
     };
-    match copy_out(unsafe { &(*vol).vol }, src, Path::new(dest), 4 * 1024 * 1024) {
+    match copy_out(
+        unsafe { &(*vol).vol },
+        src,
+        Path::new(dest),
+        4 * 1024 * 1024,
+    ) {
         Ok(s) => s.bytes as i64,
         Err(e) => {
             set_err(e.to_string());
@@ -542,7 +598,7 @@ pub extern "C" fn myntfs_list_disks(buf: *mut c_char, buf_len: usize) -> c_int {
         set_err("null buffer");
         return -1;
     }
-    let disks = match diskarb::list_ntfs_bsd_names() {
+    let disks = match diskarb::list_external_volumes() {
         Ok(d) => d,
         Err(e) => {
             set_err(e.to_string());
@@ -550,7 +606,8 @@ pub extern "C" fn myntfs_list_disks(buf: *mut c_char, buf_len: usize) -> c_int {
         }
     };
     let mut lines = Vec::new();
-    for bsd in &disks {
+    for disk in &disks {
+        let bsd = &disk.bsd;
         let info = diskarb::disk_summary(bsd).ok();
         let mount = info
             .as_ref()
@@ -562,12 +619,22 @@ pub extern "C" fn myntfs_list_disks(buf: *mut c_char, buf_len: usize) -> c_int {
             .and_then(|i| i.volume_name.clone())
             .filter(|n| n != "Not applicable" && !n.is_empty())
             .unwrap_or_else(|| {
-                diskarb::friendly_volume_name(None, if mount.is_empty() { None } else { Some(&mount) }, bsd)
+                diskarb::friendly_volume_name(
+                    None,
+                    if mount.is_empty() { None } else { Some(&mount) },
+                    bsd,
+                )
             });
         let rd = diskarb::rdisk_path(bsd);
         // Never open /dev/rdisk during scan — it can block while FSKit holds the node.
         let raw_ok = "0";
-        lines.push(format!("{bsd}|{name}|{mount}|{rd}|{raw_ok}"));
+        let fs = if disk.fs_kind.is_empty() {
+            "Unknown"
+        } else {
+            disk.fs_kind.as_str()
+        };
+        let ntfs = if disk.is_ntfs { "1" } else { "0" };
+        lines.push(format!("{bsd}|{name}|{mount}|{rd}|{raw_ok}|{fs}|{ntfs}"));
     }
     let joined = lines.join("\n");
     write_errbuf(buf, buf_len, &joined);

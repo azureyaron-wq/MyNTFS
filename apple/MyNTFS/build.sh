@@ -44,6 +44,23 @@ cat > "$OUT/Contents/Info.plist" <<'PLIST'
   <key>NSHighResolutionCapable</key><true/>
   <key>NSRemovableVolumesUsageDescription</key>
   <string>MyNTFS needs access to your USB drive so it can read and write the NTFS volume.</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Disk Image</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>img</string>
+        <string>dmg</string>
+        <string>raw</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

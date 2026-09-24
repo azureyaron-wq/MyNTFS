@@ -10,12 +10,46 @@ struct MyNTFSApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(model)
+                .onOpenURL { model.handleExternalURL($0) }
         }
-        .defaultSize(width: 1100, height: 680)
+        .defaultSize(width: 1180, height: 720)
+        .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .newItem) {
+                Button("New Folder") { model.beginNewFolder() }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                    .disabled(!model.canMutate || model.busy)
+                Button("New File") { model.beginNewFile() }
+                    .keyboardShortcut("n")
+                    .disabled(!model.canMutate || model.busy)
+                Button("Import from Mac…") { model.presentImportPanel(foldersOnly: false) }
+                    .keyboardShortcut("o")
+                    .disabled(!model.canMutate || model.busy)
+                Divider()
                 Button("Refresh Disks") { model.refreshDisks() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
+            }
+            CommandGroup(after: .newItem) {
+                Button("Get Info") { model.showGetInfo = true }
+                    .keyboardShortcut("i")
+                    .disabled(model.selectedRow == nil)
+                Button("Duplicate") { model.duplicateSelected() }
+                    .keyboardShortcut("d")
+                    .disabled(!model.canMutate || model.selectedRow == nil || model.busy)
+                Button("Copy Path") { model.copyNtfsPath() }
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                    .disabled(model.selectedRow == nil)
+            }
+            CommandMenu("Go") {
+                Button("Enclosing Folder") { model.goUp() }
+                    .keyboardShortcut(.upArrow, modifiers: .command)
+                    .disabled(!model.canGoUp)
+                Button("Volume Root") { model.goHome() }
+                    .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+                    .disabled(!model.isMounted)
+            }
+            CommandGroup(after: .help) {
+                Button("Export Activity Log…") { NotificationCenter.default.post(name: .myntfsExportLog, object: nil) }
             }
         }
     }
@@ -28,6 +62,8 @@ struct DetectedDisk: Identifiable, Equatable {
     let mountPoint: String
     let rdisk: String
     let rawOk: Bool
+    let fileSystem: String
+    let isNtfs: Bool
 
     var title: String {
         if !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -37,11 +73,12 @@ struct DetectedDisk: Identifiable, Equatable {
             let base = URL(fileURLWithPath: mountPoint).lastPathComponent
             if !base.isEmpty { return base }
         }
-        return "NTFS USB (\(bsd))"
+        return "USB (\(bsd))"
     }
 
     var subtitle: String {
         var parts = [bsd]
+        if !fileSystem.isEmpty { parts.append(fileSystem) }
         if !mountPoint.isEmpty { parts.append(mountPoint) }
         return parts.joined(separator: " · ")
     }
@@ -119,9 +156,22 @@ final class VolumeModel: ObservableObject {
     @Published var showDeleteConfirm = false
     @Published var showEnableWrite = false
     @Published var actionError = ""
+    @Published var searchText = ""
+    @Published var hideSystemFiles = true
+    @Published var showGetInfo = false
+    @Published var volumeTotal: UInt64 = 0
+    @Published var volumeFree: UInt64 = 0
+    @Published var sortMode: SortMode = .name
 
     enum NameMode {
         case newFile, newFolder, rename
+    }
+
+    enum SortMode: String, CaseIterable, Identifiable {
+        case name = "Name"
+        case size = "Size"
+        case kind = "Kind"
+        var id: String { rawValue }
     }
 
     private var handle: OpaquePointer?
@@ -183,8 +233,8 @@ final class VolumeModel: ObservableObject {
     func refreshDisks() {
         if scanning { return }
         scanning = true
-        status = "Scanning for NTFS disks…"
-        appendLog("scanning NTFS disks")
+        status = "Scanning for USB drives…"
+        appendLog("scanning USB drives")
         DispatchQueue.global(qos: .userInitiated).async {
             var buf = [CChar](repeating: 0, count: 16 * 1024)
             let n = myntfs_list_disks(&buf, buf.count)
@@ -195,13 +245,17 @@ final class VolumeModel: ObservableObject {
                 for line in text.split(separator: "\n") {
                     let p = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
                     guard p.count >= 5 else { continue }
+                    let isNtfs = p.count < 7 || p[6] == "1"
+                    let fs = p.count >= 6 && !p[5].isEmpty ? p[5] : (isNtfs ? "NTFS" : "")
                     found.append(DetectedDisk(
                         id: p[0],
                         bsd: p[0],
                         name: p[1],
                         mountPoint: p[2],
                         rdisk: p[3],
-                        rawOk: p[4] == "1"
+                        rawOk: p[4] == "1",
+                        fileSystem: fs,
+                        isNtfs: isNtfs
                     ))
                 }
             }
@@ -214,13 +268,18 @@ final class VolumeModel: ObservableObject {
                     return
                 }
                 self.disks = found
-                self.appendLog("found \(found.count) NTFS disk(s): \(found.map(\.title).joined(separator: ", "))")
+                let ntfs = found.filter(\.isNtfs)
+                self.appendLog("found \(found.count) USB volume(s): \(found.map { "\($0.title) (\($0.fileSystem))" }.joined(separator: ", "))")
                 if found.isEmpty {
-                    self.status = "No NTFS disks found. Plug in a USB drive or open a .img file."
+                    self.status = "No USB drives found. Plug in a drive or open a .img file."
                 } else if !self.isMounted {
-                    self.status = found.count == 1
-                        ? "Found \(found[0].title). Click it to explore."
-                        : "Found \(found.count) NTFS disks. Click one to explore."
+                    if ntfs.isEmpty {
+                        self.status = "Found \(found.count) USB drive\(found.count == 1 ? "" : "s"), none NTFS. MyNTFS opens NTFS volumes."
+                    } else if found.count == 1 {
+                        self.status = "Found \(found[0].title). Click it to explore."
+                    } else {
+                        self.status = "Found \(found.count) USB drives (\(ntfs.count) NTFS). Click an NTFS volume to explore."
+                    }
                 }
             }
         }
@@ -245,6 +304,23 @@ final class VolumeModel: ObservableObject {
 
     func openDisk(_ disk: DetectedDisk) {
         if busy { return }
+        if !disk.isNtfs {
+            closeEngine(remountFinder: true, restoreBrowse: false)
+            remountGen = UUID()
+            wantWrite = false
+            deviceWriteConfirmed = false
+            cwd = "/"
+            volumeTitle = disk.title
+            currentDisk = disk
+            lastDisk = disk
+            hostBrowseRoot = nil
+            handle = nil
+            entries = []
+            badge = .none
+            status = "\(disk.title) is \(disk.fileSystem), not NTFS. MyNTFS only opens NTFS volumes."
+            appendLog("skipped \(disk.title) (\(disk.bsd)): filesystem is \(disk.fileSystem)")
+            return
+        }
         busy = true
         busyMessage = "Opening \(disk.title)…"
         appendLog("opening \(disk.title) (\(disk.bsd))")
@@ -294,6 +370,17 @@ final class VolumeModel: ObservableObject {
                 self.appendLog("open failed: \(self.actionError)")
             }
         }
+    }
+
+    func revealInFinder(_ disk: DetectedDisk) {
+        let path: String
+        if !disk.mountPoint.isEmpty, FileManager.default.fileExists(atPath: disk.mountPoint) {
+            path = disk.mountPoint
+        } else {
+            path = "/Volumes"
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true))
+        appendLog("revealed \(disk.title) in Finder at \(path)")
     }
 
     func openImagePanel() {
@@ -445,6 +532,9 @@ final class VolumeModel: ObservableObject {
         deviceWriteConfirmed = false
         selectedName = nil
         cwd = "/"
+        searchText = ""
+        volumeTotal = 0
+        volumeFree = 0
         if let u = scopedURL {
             u.stopAccessingSecurityScopedResource()
             scopedURL = nil
@@ -456,7 +546,7 @@ final class VolumeModel: ObservableObject {
             busy = true
             busyCancellable = false
             mutating = false
-            busyMessage = "Returning the drive to Finder…"
+            busyMessage = "Saving changes so Windows and Finder can open the files…"
         }
 
         let remount = remountFinder
@@ -557,6 +647,13 @@ final class VolumeModel: ObservableObject {
 
     func goHome() {
         cwd = "/"
+        selectedName = nil
+        refresh()
+    }
+
+    func goTo(_ path: String) {
+        cwd = path.isEmpty ? "/" : path
+        selectedName = nil
         refresh()
     }
 
@@ -612,11 +709,9 @@ final class VolumeModel: ObservableObject {
             off += name.utf8.count + 1
             rows.append(DirRow(name: name, isDir: isDir[i] != 0, size: sizes[i]))
         }
-        entries = rows.sorted {
-            if $0.isDir != $1.isDir { return $0.isDir && !$1.isDir }
-            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-        }
-        status = "\(volumeTitle)\(cwd)  —  \(entries.count) items"
+        entries = rows
+        status = "\(volumeTitle)\(cwd)  —  \(visibleEntries.count) items"
+        refreshSpaceAsync()
     }
 
     func refreshHost() {
@@ -641,10 +736,25 @@ final class VolumeModel: ObservableObject {
                 if $0.isDir != $1.isDir { return $0.isDir && !$1.isDir }
                 return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
             }
-            status = "\(volumeTitle)\(cwd)  —  \(entries.count) items"
+            status = "\(volumeTitle)\(cwd)  —  \(visibleEntries.count) items"
         } catch {
             status = "Could not list \(folder.path): \(error.localizedDescription). Allow MyNTFS for Removable Volumes in System Settings if macOS asked."
             appendLog(status)
+        }
+    }
+
+    func refreshSpaceAsync() {
+        guard let h = handle, !busy else { return }
+        DispatchQueue.global(qos: .utility).async {
+            var total: UInt64 = 0
+            var free: UInt64 = 0
+            let rc = myntfs_volume_space(h, &total, &free)
+            DispatchQueue.main.async {
+                if rc == 0 {
+                    self.volumeTotal = total
+                    self.volumeFree = free
+                }
+            }
         }
     }
 
@@ -687,7 +797,7 @@ final class VolumeModel: ObservableObject {
             }
             return
         }
-        guard let h = handle, !entry.isDir else { return }
+        guard let h = handle else { return }
         let n = myntfs_copy_out(h, currentNtfsPath(entry.name), dest.path)
         if n < 0 {
             appendLog("copy failed \(entry.name): \(String(cString: myntfs_last_error()))")
@@ -702,7 +812,126 @@ final class VolumeModel: ObservableObject {
 
     var canMutate: Bool { handle != nil && engineWritable }
 
-    func lastErr() -> String { String(cString: myntfs_last_error()) }
+    var visibleEntries: [DirRow] {
+        var rows = entries
+        if hideSystemFiles {
+            rows = rows.filter { row in
+                !row.name.hasPrefix("$") && row.name != "System Volume Information"
+            }
+        }
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !q.isEmpty {
+            rows = rows.filter { $0.name.localizedCaseInsensitiveContains(q) }
+        }
+        rows.sort { a, b in
+            switch sortMode {
+            case .name:
+                if a.isDir != b.isDir { return a.isDir && !b.isDir }
+                return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            case .size:
+                if a.isDir != b.isDir { return a.isDir && !b.isDir }
+                if a.size != b.size { return a.size > b.size }
+                return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            case .kind:
+                if a.isDir != b.isDir { return a.isDir && !b.isDir }
+                let ae = (a.name as NSString).pathExtension
+                let be = (b.name as NSString).pathExtension
+                if ae != be { return ae.localizedCaseInsensitiveCompare(be) == .orderedAscending }
+                return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            }
+        }
+        return rows
+    }
+
+    var pathCrumbs: [(label: String, path: String)] {
+        let root = volumeTitle.isEmpty ? "Volume" : volumeTitle
+        var crumbs = [(root, "/")]
+        let parts = cwd.split(separator: "/").map(String.init)
+        var acc = ""
+        for part in parts {
+            acc += "/\(part)"
+            crumbs.append((part, acc))
+        }
+        return crumbs
+    }
+
+    var spaceCaption: String {
+        if volumeTotal == 0 { return "" }
+        let free = ByteCountFormatter.string(fromByteCount: Int64(volumeFree), countStyle: .file)
+        let total = ByteCountFormatter.string(fromByteCount: Int64(volumeTotal), countStyle: .file)
+        return "\(free) free of \(total)"
+    }
+
+    func lastErr() -> String {
+        Self.presentableEngineError(String(cString: myntfs_last_error()))
+    }
+
+    static func presentableEngineError(_ raw: String) -> String {
+        let lower = raw.lowercased()
+        if lower.contains("exceeds record capacity")
+            || lower.contains("no indx block")
+            || lower.contains("directory index")
+            || lower.contains("insert index entry") {
+            return "This folder is full. NTFS can only store so many names in one folder on this volume. Create a new folder and drop fewer items."
+        }
+        if lower.contains("is not empty") || lower.contains("index_allocation overflow") {
+            return "Could not delete this folder because something inside it could not be removed."
+        }
+        return raw
+    }
+
+    func copyNtfsPath() {
+        guard let row = selectedRow else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(currentNtfsPath(row.name), forType: .string)
+        appendLog("copied path \(currentNtfsPath(row.name))")
+    }
+
+    func copyName() {
+        guard let row = selectedRow else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(row.name, forType: .string)
+    }
+
+    func uniqueCopyName(_ name: String) -> String {
+        let ns = name as NSString
+        let ext = ns.pathExtension
+        let stem = ext.isEmpty ? name : ns.deletingPathExtension
+        var candidate = ext.isEmpty ? "\(stem) copy" : "\(stem) copy.\(ext)"
+        var i = 2
+        while entries.contains(where: { $0.name.caseInsensitiveCompare(candidate) == .orderedSame }) {
+            candidate = ext.isEmpty ? "\(stem) copy \(i)" : "\(stem) copy \(i).\(ext)"
+            i += 1
+        }
+        return candidate
+    }
+
+    func duplicateSelected() {
+        guard ensureWritable(), let row = selectedRow else { return }
+        let newName = uniqueCopyName(row.name)
+        let srcPath = currentNtfsPath(row.name)
+        runEngineWork(message: "Duplicating \(row.name)…") { h in
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MyNTFS-dup-\(UUID().uuidString)", isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            } catch {
+                return error.localizedDescription
+            }
+            let dest = tmp.appendingPathComponent(row.name)
+            if myntfs_copy_out(h, srcPath, dest.path) < 0 {
+                return self.lastErr()
+            }
+            if myntfs_copy_in(h, dest.path, self.cwd, newName) < 0 {
+                return self.lastErr()
+            }
+            try? FileManager.default.removeItem(at: tmp)
+            return nil
+        } onSuccess: {
+            self.appendLog("duplicated \(row.name) → \(newName)")
+            self.selectedName = newName
+        }
+    }
 
     func beginNewFile() {
         guard ensureWritable() else { return }
@@ -783,8 +1012,7 @@ final class VolumeModel: ObservableObject {
         guard let row = selectedRow else { return }
         runEngineWork(message: "Deleting…") { h in
             let path = self.currentNtfsPath(row.name)
-            let rc = row.isDir ? myntfs_rmdir(h, path) : myntfs_unlink(h, path)
-            return rc != 0 ? self.lastErr() : nil
+            return myntfs_remove(h, path) != 0 ? self.lastErr() : nil
         } onSuccess: {
             self.appendLog("deleted \(row.name)")
             self.selectedName = nil
@@ -838,14 +1066,73 @@ final class VolumeModel: ObservableObject {
     }
 
     func importFile(from url: URL) {
+        importHostItems([url])
+    }
+
+    func presentImportPanel(foldersOnly: Bool) {
         guard ensureWritable() else { return }
-        _ = url.startAccessingSecurityScopedResource()
-        runEngineWork(message: "Importing…") { h in
-            defer { url.stopAccessingSecurityScopedResource() }
-            return myntfs_copy_in(h, url.path, self.cwd, url.lastPathComponent) < 0 ? self.lastErr() : nil
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = !foldersOnly
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.treatsFilePackagesAsDirectories = true
+        panel.message = foldersOnly
+            ? "Choose folders to copy onto this NTFS volume."
+            : "Choose files or folders to copy onto this NTFS volume."
+        panel.prompt = "Add"
+        guard panel.runModal() == .OK else { return }
+        importHostItems(panel.urls)
+    }
+
+    func handleDrop(_ urls: [URL]) -> Bool {
+        let resolved = urls.map { $0.standardizedFileURL }
+        guard !resolved.isEmpty else { return false }
+        if !isMounted {
+            if let img = resolved.first(where: isDiskImageURL) {
+                wantWrite = false
+                deviceWriteConfirmed = false
+                open(url: img, requestWrite: false, allowDeviceWrite: false)
+                return true
+            }
+            actionError = "Open a USB volume or drop an NTFS disk image (.img) first."
+            return false
+        }
+        if !canMutate {
+            showEnableWrite = true
+            return false
+        }
+        importHostItems(resolved)
+        return true
+    }
+
+    func handleExternalURL(_ url: URL) {
+        _ = handleDrop([url])
+    }
+
+    func isDiskImageURL(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        return ["img", "dmg", "raw", "iso", "bin"].contains(ext)
+    }
+
+    func importHostItems(_ urls: [URL]) {
+        guard ensureWritable() else { return }
+        let scoped = urls
+        runEngineWork(message: "Copying from Mac…") { h in
+            for url in scoped {
+                let accessed = url.startAccessingSecurityScopedResource()
+                defer {
+                    if accessed { url.stopAccessingSecurityScopedResource() }
+                }
+                if myntfs_copy_in(h, url.path, self.cwd, url.lastPathComponent) < 0 {
+                    return self.lastErr()
+                }
+            }
+            return nil
         } onSuccess: {
-            self.appendLog("imported \(url.lastPathComponent)")
-            self.selectedName = url.lastPathComponent
+            self.appendLog("imported \(urls.map(\.lastPathComponent).joined(separator: ", "))")
+            if let last = urls.last {
+                self.selectedName = last.lastPathComponent
+            }
         }
     }
 
@@ -889,6 +1176,10 @@ final class VolumeModel: ObservableObject {
         }
         guard let disk = currentDisk ?? disks.first(where: { $0.title == volumeTitle }) else {
             actionError = "No disk selected."
+            return
+        }
+        guard disk.isNtfs else {
+            actionError = "\(disk.title) is \(disk.fileSystem). Enable writes works on NTFS only."
             return
         }
         guard !busy else { return }
@@ -1247,6 +1538,26 @@ struct DirRow: Identifiable, Hashable {
     let name: String
     let isDir: Bool
     let size: UInt64
+
+    var kindLabel: String {
+        if isDir { return "Folder" }
+        let ext = (name as NSString).pathExtension
+        return ext.isEmpty ? "File" : "\(ext.uppercased()) file"
+    }
+
+    var symbolName: String {
+        if isDir { return "folder.fill" }
+        switch (name as NSString).pathExtension.lowercased() {
+        case "txt", "md", "log", "csv": return "doc.plaintext.fill"
+        case "py", "rs", "c", "h", "swift", "js", "ts", "go", "java": return "chevron.left.forwardslash.chevron.right"
+        case "png", "jpg", "jpeg", "gif", "webp", "svg": return "photo"
+        case "zip", "gz", "tar", "7z": return "archivebox.fill"
+        case "pdf": return "doc.richtext"
+        case "sh", "command", "bat", "ps1": return "terminal.fill"
+        case "yml", "yaml", "json", "toml", "xml": return "doc.text.fill"
+        default: return "doc.fill"
+        }
+    }
 }
 
 struct ContentView: View {
@@ -1254,7 +1565,7 @@ struct ContentView: View {
     @State private var showLogExport = false
     @State private var copyTarget: DirRow?
     @State private var showCopySave = false
-    @State private var showImport = false
+    @State private var dropTargeted = false
 
     var body: some View {
         NavigationSplitView {
@@ -1267,30 +1578,57 @@ struct ContentView: View {
                         }
                         .foregroundStyle(.secondary)
                     } else if model.disks.isEmpty {
-                        Text("No NTFS disks")
+                        Text("Plug in a USB drive")
                             .foregroundStyle(.secondary)
                     }
                     ForEach(model.disks) { disk in
                         Button {
                             model.openDisk(disk)
                         } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(disk.title)
-                                Text(disk.subtitle)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                            HStack(spacing: 10) {
+                                Image(systemName: disk.isNtfs ? "externaldrive.fill" : "externaldrive")
+                                    .foregroundStyle(disk.isNtfs ? Color.accentColor : Color.secondary)
+                                    .font(.title3)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 6) {
+                                        Text(disk.title)
+                                            .fontWeight(model.currentDisk?.id == disk.id ? .semibold : .regular)
+                                        if !disk.isNtfs {
+                                            Text(disk.fileSystem.isEmpty ? "not NTFS" : disk.fileSystem)
+                                                .font(.caption2.weight(.semibold))
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 1)
+                                                .background(Color.secondary.opacity(0.18))
+                                                .clipShape(Capsule())
+                                        }
+                                    }
+                                    Text(disk.subtitle)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
+                            .padding(.vertical, 2)
                         }
                         .buttonStyle(.plain)
+                        .help(disk.isNtfs ? "Open this NTFS volume" : "\(disk.fileSystem) — MyNTFS opens NTFS only")
                     }
-                    Button("Scan disks") { model.refreshDisks() }
-                        .disabled(model.scanning || model.busy)
-                    Button("Open image…") { model.openImagePanel() }
-                        .disabled(model.busy)
+                    Button {
+                        model.refreshDisks()
+                    } label: {
+                        Label("Scan disks", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(model.scanning || model.busy)
+                    Button {
+                        model.openImagePanel()
+                    } label: {
+                        Label("Open image…", systemImage: "internaldrive")
+                    }
+                    .disabled(model.busy)
                 }
             }
             .navigationTitle("MyNTFS")
             .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 220, ideal: 260)
         } detail: {
             VStack(spacing: 0) {
                 explorerBar
@@ -1301,6 +1639,13 @@ struct ContentView: View {
                     emptyState
                 }
             }
+            .background(dropTargeted ? Color.accentColor.opacity(0.12) : Color.clear)
+            .dropDestination(for: URL.self) { urls, _ in
+                model.handleDrop(urls)
+            } isTargeted: { dropTargeted = $0 }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .myntfsExportLog)) { _ in
+            showLogExport = true
         }
         .onAppear { model.refreshDisks() }
         .overlay {
@@ -1331,15 +1676,6 @@ struct ContentView: View {
                 model.copyOut(entry: row, to: url)
             }
         }
-        .fileImporter(
-            isPresented: $showImport,
-            allowedContentTypes: [.item],
-            allowsMultipleSelection: false
-        ) { result in
-            if case .success(let urls) = result, let url = urls.first {
-                model.importFile(from: url)
-            }
-        }
         .alert("Name", isPresented: $model.showNameSheet) {
             TextField(model.nameSheetTitle, text: $model.nameSheetValue)
             Button("Cancel", role: .cancel) {}
@@ -1351,7 +1687,11 @@ struct ContentView: View {
             Button("Cancel", role: .cancel) {}
             Button("Delete", role: .destructive) { model.confirmDelete() }
         } message: {
-            Text("This cannot be undone.")
+            if model.selectedRow?.isDir == true {
+                Text("This deletes the folder and everything inside it. This cannot be undone.")
+            } else {
+                Text("This cannot be undone.")
+            }
         }
         .alert("Enable writes on \(model.volumeTitle.isEmpty ? "this disk" : model.volumeTitle)?", isPresented: $model.showEnableWrite) {
             Button("Cancel", role: .cancel) {}
@@ -1384,6 +1724,71 @@ struct ContentView: View {
             }
             .padding()
             .frame(minWidth: 520, minHeight: 360)
+        }
+        .sheet(isPresented: $model.showGetInfo) {
+            getInfoSheet
+        }
+    }
+
+    @ViewBuilder
+    private var getInfoSheet: some View {
+        let row = model.selectedRow
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(systemName: row?.symbolName ?? "doc")
+                    .font(.system(size: 36))
+                    .foregroundStyle(row?.isDir == true ? Color.accentColor : Color.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(row?.name ?? "Nothing selected")
+                        .font(.title3.weight(.semibold))
+                    Text(row?.kindLabel ?? "")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let row {
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
+                    GridRow {
+                        Text("Path").foregroundStyle(.secondary)
+                        Text(model.currentNtfsPath(row.name)).textSelection(.enabled)
+                    }
+                    GridRow {
+                        Text("Size").foregroundStyle(.secondary)
+                        Text(row.isDir ? "Folder" : ByteCountFormatter.string(fromByteCount: Int64(row.size), countStyle: .file))
+                    }
+                    GridRow {
+                        Text("On volume").foregroundStyle(.secondary)
+                        Text(model.volumeTitle.isEmpty ? "—" : model.volumeTitle)
+                    }
+                }
+                .font(.callout)
+            }
+            Spacer()
+            HStack {
+                if row != nil {
+                    Button("Copy Path") { model.copyNtfsPath() }
+                }
+                Spacer()
+                Button("Done") { model.showGetInfo = false }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 420, minHeight: 220)
+    }
+
+    private func presentCopyToMac(_ row: DirRow) {
+        if row.isDir {
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.canCreateDirectories = true
+            panel.prompt = "Copy here"
+            panel.message = "Choose a folder on this Mac to receive “\(row.name)”."
+            guard panel.runModal() == .OK, let folder = panel.url else { return }
+            model.copyOut(entry: row, to: folder.appendingPathComponent(row.name))
+        } else {
+            copyTarget = row
+            showCopySave = true
         }
     }
 
@@ -1418,7 +1823,7 @@ struct ContentView: View {
                     Image(systemName: "chevron.left")
                 }
                 .disabled(!model.canGoUp)
-                .help("Back")
+                .help("Enclosing folder (⌘↑)")
 
                 Button { model.goHome() } label: {
                     Image(systemName: "house")
@@ -1426,208 +1831,308 @@ struct ContentView: View {
                 .disabled(!model.isMounted)
                 .help("Volume root")
 
-                Text(model.isMounted ? "\(model.volumeTitle)\(model.cwd)" : "No volume")
-                    .font(.system(.body, design: .monospaced))
-                    .lineLimit(1)
-                    .truncationMode(.head)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        if model.isMounted {
+                            ForEach(Array(model.pathCrumbs.enumerated()), id: \.offset) { i, crumb in
+                                if i > 0 {
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                Button(crumb.label) { model.goTo(crumb.path) }
+                                    .buttonStyle(.plain)
+                                    .font(i == model.pathCrumbs.count - 1 ? .body.weight(.semibold) : .body)
+                            }
+                        } else {
+                            Text("No volume")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
 
-                Spacer()
+                Spacer(minLength: 8)
 
                 Text(model.badge.rawValue)
                     .font(.caption.bold())
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(model.badge.color.opacity(0.2))
+                    .background(model.badge.color.opacity(0.18))
                     .foregroundStyle(model.badge.color)
                     .clipShape(Capsule())
-
-                Button("Refresh") { model.refresh() }
-                    .disabled(!model.isMounted || model.busy)
-                Button("Export log…") { showLogExport = true }
-                Button("Close volume") { model.closeVolume() }
-                    .disabled(!model.isMounted || model.busy)
 
                 if !model.canMutate && model.isMounted {
                     Button("Enable writes…") { model.showEnableWrite = true }
                         .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
                         .disabled(model.busy || (model.safety.bitlocker && !model.enableWritesIsImage))
                 }
+                Button("Close") { model.closeVolume() }
+                    .disabled(!model.isMounted || model.busy)
+                    .help("Flush, reset the NTFS log, and return the drive to Finder")
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .padding(.vertical, 8)
 
             HStack(spacing: 8) {
-                Button("New Folder") { model.beginNewFolder() }
+                Button { model.beginNewFolder() } label: { Label("Folder", systemImage: "folder.badge.plus") }
                     .disabled(!model.canMutate || model.busy)
-                    .help(model.canMutate ? "Create a folder" : "Enable writes to create folders")
-                Button("New File") { model.beginNewFile() }
+                Button { model.presentImportPanel(foldersOnly: true) } label: { Label("Add folder", systemImage: "plus.rectangle.on.folder") }
                     .disabled(!model.canMutate || model.busy)
-                    .help(model.canMutate ? "Create a file" : "Enable writes to create files")
-                Button("Rename") { model.beginRename() }
+                Button { model.presentImportPanel(foldersOnly: false) } label: { Label("Import", systemImage: "square.and.arrow.down") }
+                    .disabled(!model.canMutate || model.busy)
+                Button { model.beginRename() } label: { Label("Rename", systemImage: "pencil") }
                     .disabled(!model.canMutate || model.selectedRow == nil || model.busy)
-                Button("Edit") { model.editSelected() }
-                    .disabled(!model.canMutate || model.selectedRow?.isDir != false || model.busy)
+                Button { model.duplicateSelected() } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
+                    .disabled(!model.canMutate || model.selectedRow == nil || model.busy)
+                Button { model.showGetInfo = true } label: { Label("Info", systemImage: "info.circle") }
+                    .disabled(model.selectedRow == nil)
                 Button("Delete", role: .destructive) { model.deleteSelected() }
                     .disabled(!model.canMutate || model.selectedRow == nil || model.busy)
-                Button("Import…") { showImport = true }
-                    .disabled(!model.canMutate || model.busy)
-                    .help(model.canMutate ? "Copy a Mac file into the volume" : "Enable writes to import")
                 Spacer()
+                Picker("Sort", selection: $model.sortMode) {
+                    ForEach(VolumeModel.SortMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 110)
+                Toggle("Hide $", isOn: $model.hideSystemFiles)
+                    .toggleStyle(.checkbox)
+                    .help("Hide NTFS metadata such as $MFT")
+                TextField("Search", text: $model.searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 180)
             }
+            .controlSize(.small)
             .padding(.horizontal, 12)
-            .padding(.bottom, 6)
+            .padding(.bottom, 8)
         }
     }
 
     private var fileList: some View {
         VStack(spacing: 0) {
             if model.canMutate {
-                HStack {
-                    Text("MyNTFS has exclusive access. Finder cannot show this drive until you Close volume.")
+                HStack(spacing: 8) {
+                    Image(systemName: "lock.open.fill").foregroundStyle(.green)
+                    Text("Exclusive access. Finder is hidden for this drive until you Close. Drop files here to copy them in.")
                         .font(.caption)
                     Spacer()
-                    Button("Close volume") { model.closeVolume() }
-                        .disabled(model.busy)
                 }
                 .padding(8)
                 .background(Color.green.opacity(0.12))
-            } else if !model.canMutate && model.isMounted {
-                HStack {
-                    Text("Read-only until you enable writes. Apple’s NTFS mount cannot create or delete files.")
+            } else if model.isMounted {
+                HStack(spacing: 8) {
+                    Image(systemName: "lock.fill").foregroundStyle(.orange)
+                    Text("Read-only. Apple’s NTFS driver cannot create or delete files.")
                         .font(.caption)
                     Spacer()
                     Button("Enable writes…") { model.showEnableWrite = true }
+                        .controlSize(.small)
                         .disabled(model.busy || (model.safety.bitlocker && !model.enableWritesIsImage))
                 }
                 .padding(8)
-                .background(Color.orange.opacity(0.15))
+                .background(Color.orange.opacity(0.12))
             }
-            List(selection: $model.selectedName) {
-                ForEach(model.entries) { row in
-                    HStack {
-                        Image(systemName: row.isDir ? "folder.fill" : "doc")
-                            .foregroundStyle(row.isDir ? Color.accentColor : Color.secondary)
-                            .frame(width: 20)
-                        Text(row.name)
-                            .lineLimit(1)
-                        Spacer()
-                        if !row.isDir {
-                            Text(ByteCountFormatter.string(fromByteCount: Int64(row.size), countStyle: .file))
-                                .foregroundStyle(.secondary)
-                                .font(.caption)
-                        }
+            ZStack {
+                if model.visibleEntries.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: model.canMutate ? "folder.badge.plus" : "folder")
+                            .font(.system(size: 36))
+                            .foregroundStyle(.secondary)
+                        Text(emptyFolderMessage)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
                     }
-                    .tag(row.name)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { model.activate(row) }
-                    .contextMenu {
-                        if row.isDir {
-                            Button("Open") { model.activate(row) }
-                            if model.canMutate {
-                                Button("Rename…") {
-                                    model.selectedName = row.name
-                                    model.beginRename()
-                                }
-                                Button("Delete…", role: .destructive) {
-                                    model.selectedName = row.name
-                                    model.deleteSelected()
-                                }
-                            }
-                        } else {
-                            Button("Open") { model.activate(row) }
-                            Button("Copy to Mac…") {
-                                copyTarget = row
-                                showCopySave = true
-                            }
-                            if model.usingHostBrowse && !model.canMutate {
-                                Button("Reveal in Finder") { model.revealInFinder(row) }
-                            }
-                            if model.canMutate {
-                                Button("Edit…") {
-                                    model.selectedName = row.name
-                                    model.editSelected()
-                                }
-                                Button("Rename…") {
-                                    model.selectedName = row.name
-                                    model.beginRename()
-                                }
-                                Button("Delete…", role: .destructive) {
-                                    model.selectedName = row.name
-                                    model.deleteSelected()
-                                }
-                            }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                List(selection: $model.selectedName) {
+                    ForEach(model.visibleEntries) { row in
+                        HStack(spacing: 10) {
+                            Image(systemName: row.symbolName)
+                                .foregroundStyle(row.isDir ? Color.accentColor : Color.secondary)
+                                .frame(width: 22)
+                            Text(row.name)
+                                .lineLimit(1)
+                            Spacer()
+                            Text(row.kindLabel)
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 88, alignment: .trailing)
+                            Text(row.isDir ? "—" : ByteCountFormatter.string(fromByteCount: Int64(row.size), countStyle: .file))
+                                .foregroundStyle(.secondary)
+                                .font(.caption.monospacedDigit())
+                                .frame(width: 88, alignment: .trailing)
                         }
-                        if model.canMutate {
-                            Divider()
-                            Button("New Folder…") { model.beginNewFolder() }
-                            Button("New File…") { model.beginNewFile() }
-                        } else if model.isMounted {
-                            Divider()
-                            Button("Enable writes…") { model.showEnableWrite = true }
-                        }
+                        .tag(row.name)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) { model.activate(row) }
+                        .contextMenu { rowMenu(row) }
                     }
                 }
+                .listStyle(.inset)
+                .opacity(model.visibleEntries.isEmpty ? 0.01 : 1)
+                .contextMenu {
+                    Button("New Folder…") { model.beginNewFolder() }
+                        .disabled(!model.canMutate)
+                    Button("Add Folder from Mac…") { model.presentImportPanel(foldersOnly: true) }
+                        .disabled(!model.canMutate)
+                    Button("Import from Mac…") { model.presentImportPanel(foldersOnly: false) }
+                        .disabled(!model.canMutate)
+                    Button("New File…") { model.beginNewFile() }
+                        .disabled(!model.canMutate)
+                }
+                .onDeleteCommand { model.deleteSelected() }
             }
-            .listStyle(.inset)
-                    .contextMenu {
-                        Button("New Folder…") { model.beginNewFolder() }
-                            .disabled(!model.canMutate)
-                        Button("New File…") { model.beginNewFile() }
-                            .disabled(!model.canMutate)
-                        Button("Import from Mac…") { showImport = true }
-                            .disabled(!model.canMutate)
-                    }
-            Text(model.status)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+            HStack {
+                Text(model.status)
+                if !model.spaceCaption.isEmpty {
+                    Text("·")
+                    Text(model.spaceCaption)
+                }
+                if !model.searchText.isEmpty {
+                    Text("·")
+                    Text("filter “\(model.searchText)”")
+                }
+                Spacer()
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+        }
+    }
+
+    private var emptyFolderMessage: String {
+        if !model.searchText.isEmpty {
+            return "No items match “\(model.searchText)”."
+        }
+        if model.hideSystemFiles && !model.entries.isEmpty {
+            return "Only NTFS system files are here. Uncheck Hide $ to show them."
+        }
+        if model.canMutate {
+            return "This folder is empty. Drop files or folders here, or use Add folder / Import."
+        }
+        return "This folder is empty."
+    }
+
+    @ViewBuilder
+    private func rowMenu(_ row: DirRow) -> some View {
+        Button("Open") { model.activate(row) }
+        Button("Get Info") {
+            model.selectedName = row.name
+            model.showGetInfo = true
+        }
+        Button("Copy to Mac…") {
+            model.selectedName = row.name
+            presentCopyToMac(row)
+        }
+        Button("Copy Path") {
+            model.selectedName = row.name
+            model.copyNtfsPath()
+        }
+        if model.usingHostBrowse && !model.canMutate {
+            Button("Reveal in Finder") { model.revealInFinder(row) }
+        }
+        if model.canMutate {
+            Divider()
+            if !row.isDir {
+                Button("Edit…") {
+                    model.selectedName = row.name
+                    model.editSelected()
+                }
+            }
+            Button("Duplicate") {
+                model.selectedName = row.name
+                model.duplicateSelected()
+            }
+            Button("Rename…") {
+                model.selectedName = row.name
+                model.beginRename()
+            }
+            Button("Delete…", role: .destructive) {
+                model.selectedName = row.name
+                model.deleteSelected()
+            }
+        } else if model.isMounted {
+            Divider()
+            Button("Enable writes…") { model.showEnableWrite = true }
         }
     }
 
     private var emptyState: some View {
         VStack(spacing: 20) {
-            Image(systemName: "externaldrive")
-                .font(.system(size: 48))
-                .foregroundStyle(.secondary)
+            Image(systemName: "externaldrive.fill")
+                .font(.system(size: 52))
+                .foregroundStyle(.tint)
+            Text("MyNTFS")
+                .font(.largeTitle.weight(.semibold))
             Text(model.status)
                 .font(.headline)
+                .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
             if model.scanning {
-                ProgressView("Scanning for NTFS disks…")
+                ProgressView("Scanning for USB drives…")
             }
-            if !model.disks.isEmpty {
+            if let disk = model.currentDisk, !disk.isNtfs {
+                VStack(spacing: 10) {
+                    Text("\(disk.title) is \(disk.fileSystem)")
+                        .font(.title3.weight(.semibold))
+                    Text("MyNTFS reads and writes NTFS. Use this stick from Finder, or format it as NTFS in Windows if you want it here.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 420)
+                    if !disk.mountPoint.isEmpty {
+                        Button("Reveal in Finder") { model.revealInFinder(disk) }
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding(.top, 4)
+            } else if !model.disks.isEmpty {
                 VStack(spacing: 10) {
                     ForEach(model.disks) { disk in
                         Button {
                             model.openDisk(disk)
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("Explore \(disk.title)")
+                                Text(disk.isNtfs ? "Explore \(disk.title)" : "\(disk.title) · \(disk.fileSystem)")
                                     .font(.headline)
-                                Text(disk.subtitle)
+                                Text(disk.isNtfs ? disk.subtitle : "Not NTFS — MyNTFS will not open this volume")
                                     .font(.caption)
                             }
                             .frame(maxWidth: 360, alignment: .leading)
                             .padding(.vertical, 6)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
+                        .tint(disk.isNtfs ? Color.accentColor : Color.secondary)
                         .disabled(model.busy)
                     }
                 }
             }
             HStack(spacing: 12) {
-                Button("Scan NTFS disks") { model.refreshDisks() }
+                Button("Scan disks") { model.refreshDisks() }
                     .disabled(model.scanning || model.busy)
                 Button("Open disk image…") { model.openImagePanel() }
                     .disabled(model.busy)
             }
+            Text("Drop an .img here, or drag files and folders onto an open read-write volume.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
     }
+}
+
+extension Notification.Name {
+    static let myntfsExportLog = Notification.Name("myntfsExportLog")
 }
 
 struct LogDocument: FileDocument {

@@ -35,12 +35,15 @@ MyNtfsVolume *myntfs_mount_fd(int fd, const char *display_path, int writable,
 
 void myntfs_umount(MyNtfsVolume *vol);
 
-/* Flush before Close so Finder sees new files. 0 = ok. */
+/* Flush, reset $LogFile, clear dirty — so Finder and Windows see the writes. 0 = ok. */
 int myntfs_sync(MyNtfsVolume *vol);
 
 int myntfs_is_writable(const MyNtfsVolume *vol);
 
 int myntfs_volume_serial(const MyNtfsVolume *vol, uint64_t *out_serial);
+
+/* total and free bytes. 0 = ok. */
+int myntfs_volume_space(MyNtfsVolume *vol, uint64_t *out_total, uint64_t *out_free);
 
 int myntfs_volume_safety(const MyNtfsVolume *vol, MyNtfsSafetyReport *out);
 
@@ -58,6 +61,8 @@ int64_t myntfs_write_contents(MyNtfsVolume *vol, const char *path,
                               const void *data, size_t len);
 int myntfs_unlink(MyNtfsVolume *vol, const char *path);
 int myntfs_rmdir(MyNtfsVolume *vol, const char *path);
+/* File, or folder plus everything inside it. */
+int myntfs_remove(MyNtfsVolume *vol, const char *path);
 int myntfs_rename(MyNtfsVolume *vol, const char *old_path, const char *new_basename);
 
 /* Unmount Finder/Paragon so /dev/rdisk* can be opened. */
@@ -72,9 +77,9 @@ int64_t myntfs_copy_in(MyNtfsVolume *vol, const char *src_host_path,
 int myntfs_format(const char *image_path, uint64_t size_bytes, const char *label,
                   char *errbuf, size_t errbuf_len);
 
-/* List NTFS disks. Each line is:
- *   bsd|volume_name|mount_point|rdisk|raw_ok
- * empty fields are allowed. Returns line count, or -1. */
+/* List external USB volumes (NTFS and others). Each line is:
+ *   bsd|volume_name|mount_point|rdisk|raw_ok|fs_kind|is_ntfs
+ * empty fields are allowed. is_ntfs is 1 or 0. Returns line count, or -1. */
 int myntfs_list_disks(char *buf, size_t buf_len);
 
 const char *myntfs_last_error(void);

@@ -57,6 +57,9 @@ int64_t myntfs_read(MyNtfsVolume *vol, const char *path, uint64_t offset,
 
 int64_t myntfs_stat_size(MyNtfsVolume *vol, const char *path, int *is_dir);
 
+/* Unix mtime seconds, or -1 on error / missing. */
+int64_t myntfs_stat_mtime(MyNtfsVolume *vol, const char *path);
+
 int myntfs_mkdir(MyNtfsVolume *vol, const char *parent, const char *name);
 int myntfs_create(MyNtfsVolume *vol, const char *parent, const char *name);
 int64_t myntfs_write_contents(MyNtfsVolume *vol, const char *path,

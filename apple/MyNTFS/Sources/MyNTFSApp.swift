@@ -82,6 +82,14 @@ struct DetectedDisk: Identifiable, Equatable {
         if !mountPoint.isEmpty { parts.append(mountPoint) }
         return parts.joined(separator: " · ")
     }
+
+    var accessibilityTitle: String {
+        if isNtfs {
+            return "\(title), NTFS, \(subtitle)"
+        }
+        let fs = fileSystem.isEmpty ? "not NTFS" : fileSystem
+        return "\(title), \(fs), \(subtitle)"
+    }
 }
 
 struct SafetyInfo {
@@ -192,6 +200,12 @@ final class VolumeModel: ObservableObject {
             handle = nil
         }
         myntfs_da_release()
+        var spins = 0
+        while myntfs_da_holding() != 0 && spins < 50 {
+            Thread.sleep(forTimeInterval: 0.02)
+            spins += 1
+        }
+        Self.cleanupStaleOpenTemps()
         if let disk = currentDisk ?? lastDisk {
             var pathbuf = [CChar](repeating: 0, count: 1024)
             var err = [CChar](repeating: 0, count: 512)
@@ -228,6 +242,46 @@ final class VolumeModel: ObservableObject {
         let trimmed = dir.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let slash = trimmed.lastIndex(of: "/") else { return "/" }
         return "/" + trimmed[..<slash]
+    }
+
+    private static let openTempFolder = "MyNTFS-open"
+    private static let openTempMaxAge: TimeInterval = 24 * 60 * 60
+
+    private static let mtimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
+
+    static func cleanupStaleOpenTemps() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(openTempFolder, isDirectory: true)
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey],
+            options: []
+        ) else { return }
+        let cutoff = Date().addingTimeInterval(-openTempMaxAge)
+        for url in items {
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
+            let stamp = values?.contentModificationDate ?? values?.creationDate
+            guard let stamp, stamp < cutoff else { continue }
+            try? fm.removeItem(at: url)
+        }
+    }
+
+    func formattedMtime(for row: DirRow) -> String {
+        if usingHostBrowse {
+            guard let url = currentHostURL(row.name),
+                  let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            else { return "—" }
+            return Self.mtimeFormatter.string(from: date)
+        }
+        guard let h = handle else { return "—" }
+        let sec = myntfs_stat_mtime(h, row.path)
+        guard sec >= 0 else { return "—" }
+        return Self.mtimeFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(sec)))
     }
 
     func refreshDisks() {
@@ -532,6 +586,7 @@ final class VolumeModel: ObservableObject {
     }
 
     func closeEngine(remountFinder: Bool, restoreBrowse: Bool = true) {
+        Self.cleanupStaleOpenTemps()
         let disk = currentDisk ?? (remountFinder ? lastDisk : nil)
         let h = handle
         handle = nil
@@ -715,7 +770,7 @@ final class VolumeModel: ObservableObject {
             }
             let name = String(cString: cstr)
             off += name.utf8.count + 1
-            rows.append(DirRow(name: name, isDir: isDir[i] != 0, size: sizes[i]))
+            rows.append(DirRow(path: joinPath(cwd, name), name: name, isDir: isDir[i] != 0, size: sizes[i]))
         }
         entries = rows
         status = "\(volumeTitle)\(cwd)  —  \(visibleEntries.count) items"
@@ -735,6 +790,7 @@ final class VolumeModel: ObservableObject {
                 if name == ".DS_Store" || name.hasPrefix("._") { return nil }
                 let vals = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
                 return DirRow(
+                    path: url.path,
                     name: name,
                     isDir: vals?.isDirectory == true,
                     size: UInt64(vals?.fileSize ?? 0)
@@ -773,12 +829,17 @@ final class VolumeModel: ObservableObject {
             return
         }
         guard handle != nil else { return }
-        busy = true
-        defer { busy = false }
-        let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MyNTFS-open", isDirectory: true)
-        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-        let dest = tmp.appendingPathComponent(row.name)
+        Self.cleanupStaleOpenTemps()
+        let session = FileManager.default.temporaryDirectory
+            .appendingPathComponent(Self.openTempFolder, isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        } catch {
+            appendLog("open temp: \(error.localizedDescription)")
+            return
+        }
+        let dest = session.appendingPathComponent(row.name)
         copyOut(entry: row, to: dest)
         NSWorkspace.shared.open(dest)
     }
@@ -1542,10 +1603,12 @@ final class VolumeModel: ObservableObject {
 }
 
 struct DirRow: Identifiable, Hashable {
-    var id: String { name }
+    let path: String
     let name: String
     let isDir: Bool
     let size: UInt64
+
+    var id: String { path }
 
     var kindLabel: String {
         if isDir { return "Folder" }
@@ -1619,6 +1682,7 @@ struct ContentView: View {
                         }
                         .buttonStyle(.plain)
                         .help(disk.isNtfs ? "Open this NTFS volume" : "\(disk.fileSystem) — MyNTFS opens NTFS only")
+                        .accessibilityLabel(disk.accessibilityTitle)
                     }
                     Button {
                         model.refreshDisks()
@@ -1626,12 +1690,14 @@ struct ContentView: View {
                         Label("Scan disks", systemImage: "arrow.clockwise")
                     }
                     .disabled(model.scanning || model.busy)
+                    .accessibilityLabel("Scan disks")
                     Button {
                         model.openImagePanel()
                     } label: {
                         Label("Open image…", systemImage: "internaldrive")
                     }
                     .disabled(model.busy)
+                    .accessibilityLabel("Open disk image")
                 }
             }
             .navigationTitle("MyNTFS")
@@ -1670,6 +1736,7 @@ struct ContentView: View {
                                 .foregroundStyle(.secondary)
                         } else if model.busyCancellable {
                             Button("Cancel") { model.cancelBusyWork() }
+                                .accessibilityLabel("Cancel")
                         }
                     }
                     .padding(24)
@@ -1764,6 +1831,10 @@ struct ContentView: View {
                         Text(row.isDir ? "Folder" : ByteCountFormatter.string(fromByteCount: Int64(row.size), countStyle: .file))
                     }
                     GridRow {
+                        Text("Modified").foregroundStyle(.secondary)
+                        Text(model.formattedMtime(for: row)).textSelection(.enabled)
+                    }
+                    GridRow {
                         Text("On volume").foregroundStyle(.secondary)
                         Text(model.volumeTitle.isEmpty ? "—" : model.volumeTitle)
                     }
@@ -1832,12 +1903,14 @@ struct ContentView: View {
                 }
                 .disabled(!model.canGoUp)
                 .help("Enclosing folder (⌘↑)")
+                .accessibilityLabel("Enclosing folder")
 
                 Button { model.goHome() } label: {
                     Image(systemName: "house")
                 }
                 .disabled(!model.isMounted)
                 .help("Volume root")
+                .accessibilityLabel("Volume root")
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 4) {
@@ -1874,10 +1947,14 @@ struct ContentView: View {
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
                         .disabled(model.busy || (model.safety.bitlocker && !model.enableWritesIsImage))
+                        .accessibilityLabel("Enable writes")
+                        .accessibilityHint("Ask macOS for exclusive access so MyNTFS can write")
                 }
                 Button("Close") { model.closeVolume() }
                     .disabled(!model.isMounted || model.busy)
                     .help("Flush, reset the NTFS log, and return the drive to Finder")
+                    .accessibilityLabel("Close volume")
+                    .accessibilityHint("Flush, reset the NTFS log, and return the drive to Finder")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -1885,18 +1962,25 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Button { model.beginNewFolder() } label: { Label("Folder", systemImage: "folder.badge.plus") }
                     .disabled(!model.canMutate || model.busy)
+                    .accessibilityLabel("New folder")
                 Button { model.presentImportPanel(foldersOnly: true) } label: { Label("Add folder", systemImage: "plus.rectangle.on.folder") }
                     .disabled(!model.canMutate || model.busy)
+                    .accessibilityLabel("Add folder from this Mac")
                 Button { model.presentImportPanel(foldersOnly: false) } label: { Label("Import", systemImage: "square.and.arrow.down") }
                     .disabled(!model.canMutate || model.busy)
+                    .accessibilityLabel("Import from this Mac")
                 Button { model.beginRename() } label: { Label("Rename", systemImage: "pencil") }
                     .disabled(!model.canMutate || model.selectedRow == nil || model.busy)
+                    .accessibilityLabel("Rename selected item")
                 Button { model.duplicateSelected() } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
                     .disabled(!model.canMutate || model.selectedRow == nil || model.busy)
+                    .accessibilityLabel("Duplicate selected item")
                 Button { model.showGetInfo = true } label: { Label("Info", systemImage: "info.circle") }
                     .disabled(model.selectedRow == nil)
+                    .accessibilityLabel("Get Info")
                 Button("Delete", role: .destructive) { model.deleteSelected() }
                     .disabled(!model.canMutate || model.selectedRow == nil || model.busy)
+                    .accessibilityLabel("Delete selected item")
                 Spacer()
                 Picker("Sort", selection: $model.sortMode) {
                     ForEach(VolumeModel.SortMode.allCases) { mode in
@@ -1938,6 +2022,8 @@ struct ContentView: View {
                     Button("Enable writes…") { model.showEnableWrite = true }
                         .controlSize(.small)
                         .disabled(model.busy || (model.safety.bitlocker && !model.enableWritesIsImage))
+                        .accessibilityLabel("Enable writes")
+                        .accessibilityHint("Ask macOS for exclusive access so MyNTFS can write")
                 }
                 .padding(8)
                 .background(Color.orange.opacity(0.12))
@@ -1978,6 +2064,8 @@ struct ContentView: View {
                         .contentShape(Rectangle())
                         .onTapGesture(count: 2) { model.activate(row) }
                         .contextMenu { rowMenu(row) }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("\(row.name), \(row.kindLabel)")
                     }
                 }
                 .listStyle(.inset)
@@ -2119,14 +2207,17 @@ struct ContentView: View {
                         .buttonStyle(.bordered)
                         .tint(disk.isNtfs ? Color.accentColor : Color.secondary)
                         .disabled(model.busy)
+                        .accessibilityLabel(disk.accessibilityTitle)
                     }
                 }
             }
             HStack(spacing: 12) {
                 Button("Scan disks") { model.refreshDisks() }
                     .disabled(model.scanning || model.busy)
+                    .accessibilityLabel("Scan disks")
                 Button("Open disk image…") { model.openImagePanel() }
                     .disabled(model.busy)
+                    .accessibilityLabel("Open disk image")
             }
             Text("Drop an .img here, or drag files and folders onto an open read-write volume.")
                 .font(.caption)

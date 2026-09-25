@@ -372,6 +372,25 @@ pub extern "C" fn myntfs_stat_size(
 }
 
 #[no_mangle]
+pub extern "C" fn myntfs_stat_mtime(vol: *mut MyNtfsVolume, path: *const c_char) -> i64 {
+    if vol.is_null() || path.is_null() {
+        set_err("null argument");
+        return -1;
+    }
+    let Ok(p) = (unsafe { CStr::from_ptr(path) }).to_str() else {
+        set_err("invalid path");
+        return -1;
+    };
+    match unsafe { (*vol).vol.stat(p) } {
+        Ok(st) => st.mtime_sec,
+        Err(e) => {
+            set_err(e.to_string());
+            -1
+        }
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn myntfs_mkdir(
     vol: *mut MyNtfsVolume,
     parent: *const c_char,

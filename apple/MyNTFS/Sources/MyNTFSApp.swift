@@ -515,6 +515,14 @@ final class VolumeModel: ObservableObject {
         )
     }
 
+    @discardableResult
+    private func syncThenUmount(_ h: OpaquePointer) -> Bool {
+        let ok = myntfs_sync(h) == 0
+        if !ok { appendLog("flush before umount: \(lastErr())") }
+        myntfs_umount(h)
+        return ok
+    }
+
     func close() {
         closeEngine(remountFinder: currentDisk != nil, restoreBrowse: true)
     }
@@ -1340,7 +1348,7 @@ final class VolumeModel: ObservableObject {
         let mounted = myntfs_mount_fd(fd, disk.rdisk, 1, 1, &err, err.count)
         Darwin.close(fd)
         if cancelled() {
-            if let mounted { myntfs_umount(mounted) }
+            if let mounted { syncThenUmount(mounted) }
             cancelledRestore()
             return
         }
@@ -1358,7 +1366,7 @@ final class VolumeModel: ObservableObject {
         let safetyInfo = safetyFromVolume(mounted)
         DispatchQueue.main.async {
             if self.workGen != gen || self.elevateCancelled {
-                myntfs_umount(mounted)
+                self.syncThenUmount(mounted)
                 DispatchQueue.global(qos: .userInitiated).async {
                     myntfs_da_release()
                     let folder = self.mountFinderPath(disk)
@@ -1373,7 +1381,7 @@ final class VolumeModel: ObservableObject {
             self.mutating = false
             self.busyMessage = ""
             if let old = self.handle {
-                myntfs_umount(old)
+                self.syncThenUmount(old)
             }
             self.hostBrowseRoot = nil
             self.handle = mounted
@@ -1447,7 +1455,7 @@ final class VolumeModel: ObservableObject {
         if t.contains("authorization cancelled") {
             return "Authorization cancelled. Writes were not enabled."
         }
-        if t.contains("paragon") || t.contains("another driver") {
+        if t.contains("another driver") {
             return "Another driver still holds this volume. Unmount it in Disk Utility, then try again."
         }
         if t.contains("internal") || t.contains("boot") {

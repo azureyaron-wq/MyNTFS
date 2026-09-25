@@ -80,6 +80,16 @@ pub struct Volume {
     serial: Option<u64>,
 }
 
+/// Backstop flush. Callers that care about the error string should still
+/// invoke `commit_for_unmount` (or FFI `myntfs_sync`) explicitly first.
+impl Drop for Volume {
+    fn drop(&mut self) {
+        if self.writable {
+            let _ = self.commit_for_unmount();
+        }
+    }
+}
+
 impl Volume {
     pub fn mount(path: impl AsRef<Path>, policy: WritePolicy) -> Result<Self> {
         Self::mount_with_confirm(path, policy, DeviceWriteConfirm::default())

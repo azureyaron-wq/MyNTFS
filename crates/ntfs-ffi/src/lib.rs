@@ -168,12 +168,19 @@ pub extern "C" fn myntfs_mount_fd(
     }
 }
 
+/// Destroys the volume. Best-effort `commit_for_unmount` first (no-op if
+/// read-only), then drop. Never leaks the Box. `myntfs_sync` is the same
+/// commit without destroying the handle.
 #[no_mangle]
 pub extern "C" fn myntfs_umount(vol: *mut MyNtfsVolume) {
-    if !vol.is_null() {
-        unsafe {
-            drop(Box::from_raw(vol));
+    if vol.is_null() {
+        return;
+    }
+    unsafe {
+        if let Err(e) = (*vol).vol.commit_for_unmount() {
+            set_err(e.to_string());
         }
+        drop(Box::from_raw(vol));
     }
 }
 

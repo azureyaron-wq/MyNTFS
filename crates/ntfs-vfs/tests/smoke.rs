@@ -167,6 +167,17 @@ fn commit_for_unmount_succeeds_after_writes() {
 }
 
 #[test]
+fn drop_readonly_volume_does_not_panic() {
+    let dir = std::env::temp_dir().join(format!("myntfs-drop-ro-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let img = dir.join("vol.img");
+    format_image(&img, 64 * 1024 * 1024, Some("DropRo")).unwrap();
+    let vol = Volume::mount(&img, WritePolicy::ReadOnly).unwrap();
+    drop(vol);
+}
+
+#[test]
 fn copy_in_streams_large_file_and_copy_out_folder() {
     use ntfs_vfs::{copy_in, copy_out};
 

@@ -33,9 +33,11 @@ MyNtfsVolume *myntfs_mount_ex(const char *path, int writable, int allow_device_w
 MyNtfsVolume *myntfs_mount_fd(int fd, const char *display_path, int writable,
                               int allow_device_write, char *errbuf, size_t errbuf_len);
 
+/* Destroy the volume. Best-effort commit_for_unmount first (flush, $LogFile,
+ * dirty). Read-only mounts no-op the commit. */
 void myntfs_umount(MyNtfsVolume *vol);
 
-/* Flush, reset $LogFile, clear dirty — so Finder and Windows see the writes. 0 = ok. */
+/* Same commit as umount, without destroying the handle. 0 = ok. */
 int myntfs_sync(MyNtfsVolume *vol);
 
 int myntfs_is_writable(const MyNtfsVolume *vol);
@@ -65,7 +67,7 @@ int myntfs_rmdir(MyNtfsVolume *vol, const char *path);
 int myntfs_remove(MyNtfsVolume *vol, const char *path);
 int myntfs_rename(MyNtfsVolume *vol, const char *old_path, const char *new_basename);
 
-/* Unmount Finder/Paragon so /dev/rdisk* can be opened. */
+/* Unmount Finder or another driver so /dev/rdisk* can be opened. */
 int myntfs_claim(const char *bsd, char *errbuf, size_t errbuf_len);
 
 int64_t myntfs_copy_out(MyNtfsVolume *vol, const char *ntfs_path,

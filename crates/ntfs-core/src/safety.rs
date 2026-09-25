@@ -24,7 +24,6 @@ pub struct SafetyReport {
     pub hibernated: bool,
     pub bitlocker: bool,
     pub efs_present: bool,
-    pub paragon_claimed: bool,
     pub reasons: Vec<String>,
 }
 

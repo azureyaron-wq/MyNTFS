@@ -1,7 +1,7 @@
 //! Disk discovery / unmount helpers.
 //!
 //! On macOS this talks to `diskutil` so we can take an NTFS volume away from
-//! Paragon or Apple's read-only probe and open `/dev/rdisk*`.
+//! Finder or another driver and open `/dev/rdisk*`.
 
 use ntfs_core::{Error, Result};
 

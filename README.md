@@ -4,7 +4,7 @@ Open-source, permissive NTFS **explorer + explicit USB write** for Mac/Linux —
 
 > **Experimental / pre-1.0.** Write support can **corrupt or destroy** volume data. Backup first. Use **disposable USB sticks** for write tests. The software is provided **AS IS**, without warranty of any kind — see [LICENSE-MIT](LICENSE-MIT) or [LICENSE-APACHE](LICENSE-APACHE).
 >
-> This is **not** a notarized Finder automount replacement for Paragon/Tuxera. There are **no** official binary GitHub Releases yet. Clone and **build from source**.
+> This is **not** a notarized Finder automount product. There are **no** official binary GitHub Releases yet. Clone and **build from source**.
 
 NTFS is a trademark of Microsoft Corporation. MyNTFS is an independent project and is **not affiliated with, endorsed by, or sponsored by Microsoft**.
 

@@ -1633,7 +1633,11 @@ struct DirRow: Identifiable, Hashable {
 
 struct ContentView: View {
     @EnvironmentObject var model: VolumeModel
-    @State private var showLogExport = false
+    @StateObject private var _showLogExport = StateObject(initialValue: false)
+    private var showLogExport: Bool {
+        get { _showLogExport.wrappedValue }
+        set { _showLogExport.wrappedValue = newValue }
+    }
     @State private var copyTarget: DirRow?
     @State private var showCopySave = false
     @State private var dropTargeted = false
@@ -1768,7 +1772,7 @@ struct ContentView: View {
                 Text("This cannot be undone.")
             }
         }
-        .alert("Enable writes on \(model.volumeTitle.isEmpty ? "this disk" : model.volumeTitle)?", isPresented: $model.showEnableWrite) {
+        .alert("Enable writes on \(model.volumeTitle.isEmpty ? "this disk" : model.volumeTitle)?\n\nWarning: Experimental writes may corrupt or destroy your data.", isPresented: $model.showEnableWrite) {
             Button("Cancel", role: .cancel) {}
             if !(model.safety.bitlocker && !model.enableWritesIsImage) {
                 Button("Enable writes", role: .destructive) { model.enableWrites() }
